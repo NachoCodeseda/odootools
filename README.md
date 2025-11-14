@@ -22,6 +22,7 @@ Get an instance of odoo environment to test methods or view data
 
 > [!NOTE]
 > The Tools library only works with following directory structure. Working on better implementation
+
 ´´´
 ─ /opt/odoo[version]  /opt/odoo17 for example
   └ /odoo             odoo repository
