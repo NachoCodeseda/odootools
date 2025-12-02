@@ -161,16 +161,19 @@ class Tools():
         """
         self.print_report('stock', 'stock.action_report_picking_packages', res_id, report_file='packages')
         
-    def uninstall_module(self, module: str):
+    def uninstall_module(self, module: str | list[str]):
         """
         Uninstall module.
 
         :param module: name of the module to uninstall
         """
-        module_id = self.env['ir.module.module'].search([('name', '=', module)])
-        
-        if module_id:
-            print(f"Uninstalling {module_id.name}.")
-            module_id.sudo().button_immediate_uninstall()
-        else:
-            print(f"Module {module} not found.")
+        if isinstance(module, str):
+            module = [module]
+        for mod in module:
+            module_id = self.env['ir.module.module'].search([('name', '=', mod)])
+            
+            if module_id:
+                print(f"Uninstalling {module_id.name}.")
+                module_id.sudo().button_immediate_uninstall()
+            else:
+                print(f"Module {mod} not found.")

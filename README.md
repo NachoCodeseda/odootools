@@ -1,3 +1,5 @@
+![Python versions](https://img.shields.io/badge/python-3.8%20|%203.9%20|%203.10%20|%203.11%20|%203.12%20|%203.13%20|%203.14-blue)
+
 ## Installation
 
 Install via pip
