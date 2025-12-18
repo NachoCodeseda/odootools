@@ -294,6 +294,16 @@ def main():
             
         print("Database {} dumped.".format(db_name))
     
+    def duplicate_db(db_name):
+        new_db_name = input(f'Enter the name of the new DB: ')
+        neutralize_database = YesNo('Neutralize DB?:', 'n').launch()
+        try:
+            odoo.service.db.exp_duplicate_database(db_name, new_db_name, neutralize_database)
+            print(GREEN_TEXT.format("Database {} duplicated.".format(db_name)))
+            
+        except Exception:
+            print(traceback.format_exc())
+    
     def send_db(db_name):
         try:
             to = Bullet("Select odoo path:",choices=ODOO_PATHS).launch()
@@ -472,6 +482,7 @@ def main():
                 'Restore DB',
                 'Drop DB',
                 'Backup DB',
+                'Duplicate DB',
                 'Send DB',
                 'Change DB user',
                 'Migrate DB',
@@ -511,6 +522,12 @@ def main():
                 db_name = select_db()
                 if not db_name: continue
                 dump_db(db_name)
+                
+            elif option == 'Duplicate DB':
+                print(BLUE_TEXT.format("Duplicate DB"))
+                db_name = select_db()
+                if not db_name: continue
+                duplicate_db(db_name)
             
             elif option == 'Send DB':
                 print(BLUE_TEXT.format("Send DB"))
