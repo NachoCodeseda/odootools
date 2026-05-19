@@ -1,177 +1,170 @@
-import sys, os, logging, traceback
+import sys
+import os
+import logging
+import traceback
 from pathlib import Path
-from packaging import version
+from typing import List, Optional, Union
+from packaging import version as pkg_version
+from .discovery import discover_odoo, find_conf_file
 
 
 _logger = logging.getLogger(__name__)
 
 
-try:
-    # TODO: Better implementation
-    CURRENT_DIR = str(Path(__file__).resolve().parent)
-    VERSIONS = ['12', '13', '14', '15', '16', '17', '18', '19']
-    root_path = [f"/opt/odoo{version}" for version in VERSIONS if f"odoo{version}" in CURRENT_DIR]
+_odoo_path, _odoo_conf = discover_odoo()
 
-    odoo_path = os.path.join(root_path[0], "odoo")
-    odoo_conf = os.path.join(root_path[0], "odoo.conf")
-except Exception:
-    _logger.error("Error retrieving the Odoo path")
-    
-sys.path.append(CURRENT_DIR) # Resolves Jupyter error
-sys.path.append(odoo_path)
+sys.path.append(str(Path(__file__).resolve().parent))  # Resolves Jupyter error
+if _odoo_path:
+    sys.path.append(_odoo_path)
+
 import odoo
 from odoo import api, SUPERUSER_ID
 
-class Tools():
+# Module-level defaults used by Tools.__init__ when the caller does not specify them
+odoo_conf = _odoo_conf or ""
 
-    def __init__(self, db_name, odoo_conf=odoo_conf, uid=SUPERUSER_ID, context={'lang': 'es_ES'}):        
+
+class Tools:
+
+    def __init__(self, db_name, odoo_conf=odoo_conf, uid=SUPERUSER_ID, context=None):
+        if context is None:
+            context = {'lang': 'es_ES'}
         odoo.tools.config.parse_config(['-c', odoo_conf])
+        self._odoo_version = pkg_version.parse(odoo.release.version)
         registry = odoo.modules.registry.Registry(db_name)
         cursor = registry.cursor()
+
+        # Odoo 12-14 stores active environments in a werkzeug LocalStack.
+        # Outside a real request (scripts, Jupyter) that stack is empty, so
+        # api.Environment.__new__ raises AttributeError: 'environments'.
+        # Entering manage() initialises the stack for the current greenlet/thread.
+        # The method no longer exists in Odoo 15+, so we guard with hasattr().
+        self._env_manager = None
+        if hasattr(api.Environment, 'manage'):
+            self._env_manager = api.Environment.manage()
+            self._env_manager.__enter__()
+
         self.env = api.Environment(cursor, uid, context)
-        
+
     def close(self):
         if self.env.cr and not self.env.cr.closed:
             self.env.cr.close()
             print("Cursor closed.")
+        if self._env_manager is not None:
+            self._env_manager.__exit__(None, None, None)
+            self._env_manager = None
 
     def __enter__(self):
         return self
 
-    def __exit__(self, exc_type, exc_value, traceback):
+    def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
-        
+
     def get_env(self):
         return self.env
-    
+
     def dump_db(self, path):
-        """
-        Creates a backup of the current database in ZIP format.
-
-        This method generates a backup of the database associated with the current
-        environment. The backup is saved as a .zip file in the "backups" directory
-        within the base directory. If the directory does not exist, it is created.
-
-        The backup file is named after the database name with a .zip extension.
-
-        Raises:
-            OSError: If there is an error creating the directory or writing the file.
-        """
-
-        os.makedirs(path, exist_ok=True)
+        """Creates a backup of the current database in ZIP format."""
+        path = Path(path)
+        path.mkdir(parents=True, exist_ok=True)
         backup_file = path / f"{self.env.cr.dbname}.zip"
         with open(backup_file, "wb") as destiny:
             odoo.service.db.dump_db(self.env.cr.dbname, destiny, "zip")
-        
-    def print_report(self, report_xml_id: str, res_id: int, report_file: str="report.pdf"):
+
+    def print_report(self, report_xml_id: str, res_id: int, report_file: str = "report.pdf"):
         """
-        Prints a report to a PDF file.
-        Note: If the report prints without format be sure the odoo service is running.
-        
-        :param report_xml_id: The XML ID of the report to print.
-        :param res_id: The ID of the record to print the report for.
-        :param report_file: The path to save the PDF file.
+        Generates a PDF report and saves it to a file.
+        Note: If the report prints without formatting, ensure the Odoo service is running.
+
+        :param report_xml_id: Full XML ID of the report action (e.g. 'sale.action_report_saleorder')
+        :param res_id: ID of the record to render
+        :param report_file: Destination path for the PDF file (must end with .pdf)
         """
         if not report_file.endswith('.pdf'):
-            raise Exception('The report_file must end with .pdf')
-        
+            raise ValueError('The report_file must end with .pdf')
+
         report = self.env.ref(report_xml_id)
 
-        pdf_content, _ = self.env['ir.actions.report']._render_qweb_pdf(report.id, res_id)
+        # Report rendering API changed across Odoo versions:
+        # Odoo 12-13: render_qweb_pdf (public) on the report record
+        # Odoo 14-16: _render_qweb_pdf on the report record
+        # Odoo 17+:   _render_qweb_pdf as @api.model with explicit report_ref
+        if self._odoo_version >= pkg_version.parse('17.0'):
+            pdf_content, _ = self.env['ir.actions.report']._render_qweb_pdf(report, [res_id])
+        elif self._odoo_version >= pkg_version.parse('14.0'):
+            pdf_content, _ = report._render_qweb_pdf([res_id])
+        else:
+            pdf_content, _ = report.render_qweb_pdf([res_id])
 
         with open(report_file, "wb") as f:
             f.write(pdf_content)
 
         print(f"PDF generated and saved in: {report_file}")
-        
-    
+
     def update_records_from_xml(self, module_name: str, file_name: str):
         """
-        Update the records in the .xml file.
+        Reloads records from an XML file within a module.
 
-        :param module_name: Name of the module containing the .xml file
-        :param file_name: Path to the .xml file in the module's manifest
+        :param module_name: Name of the module containing the XML file
+        :param file_name: Path to the XML file as listed in the module manifest
         """
-        if version.parse(odoo.release.version) >= version.parse('17.0'):
+        # convert_file first argument changed in Odoo 17: env instead of cr
+        if self._odoo_version >= pkg_version.parse('17.0'):
             odoo.tools.convert_file(self.env, module_name, file_name, {})
-        else:    
+        else:
             odoo.tools.convert_file(self.env.cr, module_name, file_name, {})
-        
-    def report_editor(self, module_name: str, report_file: str, action_xml_id: str, res_id: int, file_name: str ):
+
+    def report_editor(self, module_name: str, report_file: str, action_xml_id: str, res_id: int, file_name: str):
         """
-        Edits the records in the .xml file and prints the report.
+        Interactive loop that reloads XML records and regenerates a PDF report on each iteration.
 
-        This method loads the records from the .xml file and prints the report associated with the
-        given action_xml_id. The report is saved in a .pdf file with the given file_name.
-
-        The method will continue to ask for input until the user presses 'c' to close.
-
-        :param module_name: Name of the module containing the .xml file
-        :param report_file: Path to the .xml file in the module's manifest
-        :param action_xml_id: The XML ID of the report to print
-        :param res_id: The ID of the record to print the report for
-        :param file_name: The path to save the PDF file
+        :param module_name: Module containing the report template
+        :param report_file: XML file path within the module
+        :param action_xml_id: XML ID of the report action (without module prefix)
+        :param res_id: ID of the record to render
+        :param file_name: Destination PDF file path (must end with .pdf)
         """
         while True:
             try:
                 self.update_records_from_xml(module_name, report_file)
                 self.print_report(f'{module_name}.{action_xml_id}', res_id, file_name)
-                if input("Press enter to continue (c to close)") == 'c': break
-            except Exception as e:
+                if input("Press enter to continue (c to close): ") == 'c':
+                    break
+            except Exception:
                 print(traceback.format_exc())
-                if input("Press enter to continue (c to close)") == 'c': break
-        
+                if input("Press enter to continue (c to close): ") == 'c':
+                    break
+
     def print_sale_order(self, res_id: int):
-        """
-        Prints a sale order report.
+        """Generates a sale order PDF report."""
+        self.print_report('sale.action_report_saleorder', res_id, report_file='sale_order.pdf')
 
-        :param res_id: id of the sale order record
-        """
-        self.print_report('sale', 'sale.action_report_saleorder', res_id, report_file='sale_order')
-        
     def print_invoice(self, res_id: int):
-        """
-        Prints an invoice report.
+        """Generates an invoice PDF report."""
+        self.print_report('account.account_invoices', res_id, report_file='invoice.pdf')
 
-        :param res_id: id of the invoice record
-        """
-        self.print_report('account', 'account.account_invoices', res_id, report_file='invoice')
-        
     def print_delivery(self, res_id: int):
-        """
-        Print a delivery report.
+        """Generates a delivery order PDF report."""
+        self.print_report('stock.action_report_delivery', res_id, report_file='delivery.pdf')
 
-        :param res_id: id of the move
-        """
-        self.print_report('stock', 'stock.action_report_delivery', res_id, report_file='delivery')
-        
     def print_picking(self, res_id: int):
-        """
-        Print a picking report.
+        """Generates a picking PDF report."""
+        self.print_report('stock.action_report_picking', res_id, report_file='picking.pdf')
 
-        :param res_id: id of the picking record
-        """
-        self.print_report('stock', 'stock.action_report_picking', res_id, report_file='picking')
-        
     def print_packages(self, res_id: int):
-        """
-        Print a picking packages report.
+        """Generates a picking packages PDF report."""
+        self.print_report('stock.action_report_picking_packages', res_id, report_file='packages.pdf')
 
-        :param res_id: id of the picking record
+    def uninstall_module(self, module: Union[str, List[str]]):
         """
-        self.print_report('stock', 'stock.action_report_picking_packages', res_id, report_file='packages')
-        
-    def uninstall_module(self, module: str | list[str]):
-        """
-        Uninstall module.
+        Uninstalls one or more Odoo modules.
 
-        :param module: name of the module to uninstall
+        :param module: Module name or list of module names to uninstall
         """
         if isinstance(module, str):
             module = [module]
         for mod in module:
             module_id = self.env['ir.module.module'].search([('name', '=', mod)])
-            
             if module_id:
                 print(f"Uninstalling {module_id.name}.")
                 module_id.sudo().button_immediate_uninstall()
