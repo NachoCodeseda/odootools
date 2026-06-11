@@ -153,7 +153,7 @@ def main():
         # Single-quote escaping for string literals in SQL (doubling single quotes is the SQL standard)
         escaped = db_name.replace("'", "''")
         cmd = [
-            'psql', '-c',
+            'psql', '-d', 'postgres', '-c',
             f"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '{escaped}';"
         ]
         subprocess.run(cmd, check=True, env=SUBPROCESS_ENV)
