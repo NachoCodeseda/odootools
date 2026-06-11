@@ -365,7 +365,7 @@ def main():
                 _pg_quote_ident(db_user) if db_user else 'CURRENT_USER',
             )
             print(sql_query)
-            cmd = ["psql", "-c", "-d", "postgres", sql_query]
+            cmd = ["psql", "-d", "postgres", "-c", sql_query]
 
             with subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
