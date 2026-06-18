@@ -615,6 +615,9 @@ def main():
                     continue
                 registry = odoo.modules.registry.Registry(db_name)
                 cursor = registry.cursor()
+                # Odoo <15 requires manage() context to initialize thread-local environments storage
+                if hasattr(odoo.api.Environment, 'manage'):
+                    odoo.api.Environment.manage().__enter__()
                 env = odoo.api.Environment(cursor, SUPERUSER_ID, {'lang': 'es_ES'})
 
             elif option == 'Uninstall Module':
