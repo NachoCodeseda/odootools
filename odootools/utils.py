@@ -165,7 +165,7 @@ class Tools:
             module = [module]
         for mod in module:
             module_id = self.env['ir.module.module'].search([('name', '=', mod)])
-            if module_id:
+            if module_id and module_id.state in ('installed', 'to upgrade'):
                 print(f"Uninstalling {module_id.name}.")
                 module_id.sudo().button_immediate_uninstall()
             else:
