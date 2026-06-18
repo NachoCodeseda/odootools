@@ -168,5 +168,7 @@ class Tools:
             if module_id and module_id.state in ('installed', 'to upgrade'):
                 print(f"Uninstalling {module_id.name}.")
                 module_id.sudo().button_immediate_uninstall()
-            else:
+            elif not module_id:
                 print(f"Module {mod} not found.")
+            else:
+                print(f"Module {mod} is not installed.")
