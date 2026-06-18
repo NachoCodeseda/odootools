@@ -458,6 +458,7 @@ def main():
     def change_db_user(db_name):
         cmd = [
             'psql',
+            '-d', 'postgres',
             "-t", "-A", "--no-psqlrc",
             '-c',
             'SELECT rolname FROM pg_roles WHERE rolcanlogin = true ORDER BY rolname;',
@@ -468,7 +469,7 @@ def main():
         user = Bullet("Select the new DB user:", choices=users).launch()
         if user == 'Cancel':
             return
-        cmd = ['psql', '-c', f"ALTER DATABASE {_pg_quote_ident(db_name)} OWNER TO {_pg_quote_ident(user)};"]
+        cmd = ['psql', '-d', 'postgres', '-c', f"ALTER DATABASE {_pg_quote_ident(db_name)} OWNER TO {_pg_quote_ident(user)};"]
         subprocess.run(cmd, capture_output=True, check=True, env=SUBPROCESS_ENV)
         print(GREEN_TEXT.format(f"DB {db_name} owner changed to {user}."))
 
