@@ -79,18 +79,25 @@ def main():
 
     get_odoo_path()
 
+    # Fallbacks in case the try block below fails or the symbols are absent
+    # in an older Odoo version — must be defined before they are used as
+    # decorators/closures further down the function.
+    def check_db_management_enabled(fn):
+        return fn
+
+    SUBPROCESS_ENV = {**os.environ}
+
+    def find_pg_tool(tool):
+        return tool
+
     try:
         sys.path.append(ODOO_PATH)
         import odoo
+        # Odoo 19 is a namespace package (no __init__.py), so submodules are
+        # not auto-imported — we must import odoo.tools explicitly.
+        import odoo.tools
         odoo.tools.config.parse_config(['-c', ODOO_CONF, '--logfile='])
         from odoo import SUPERUSER_ID
-
-        try:
-            from odoo.service.db import exp_db_exist, check_db_management_enabled
-        except ImportError:
-            from odoo.service.db import exp_db_exist
-            def check_db_management_enabled(fn):
-                return fn
 
         try:
             from odoo.tools.misc import exec_pg_environ, find_pg_tool
