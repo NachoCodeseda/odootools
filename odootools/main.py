@@ -98,6 +98,10 @@ def main():
         import odoo.tools
         odoo.tools.config.parse_config(['-c', ODOO_CONF, '--logfile='])
         from odoo import SUPERUSER_ID
+        import odoo.api
+        import odoo.modules.registry
+        import odoo.service.db
+        import odoo.sql_db
 
         try:
             from odoo.tools.misc import exec_pg_environ, find_pg_tool
