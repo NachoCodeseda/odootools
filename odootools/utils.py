@@ -1,9 +1,8 @@
 import sys
-import os
 import logging
 import traceback
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import List, Union
 from packaging import version as pkg_version
 from .discovery import discover_odoo, find_conf_file
 
@@ -58,6 +57,9 @@ class Tools:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+        
+    def __del__(self):
         self.close()
 
     def get_env(self):
