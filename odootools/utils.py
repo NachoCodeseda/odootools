@@ -39,7 +39,7 @@ class Tools:
         # Entering manage() initialises the stack for the current greenlet/thread.
         # The method no longer exists in Odoo 15+, so we guard with hasattr().
         self._env_manager = None
-        if hasattr(api.Environment, 'manage'):
+        if hasattr(api.Environment, 'manage') and self._odoo_version < pkg_version.parse('15.0'):
             self._env_manager = api.Environment.manage()
             self._env_manager.__enter__()
 
