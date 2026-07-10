@@ -1,3 +1,4 @@
+import os
 import sys
 import logging
 import traceback
@@ -16,19 +17,54 @@ sys.path.append(str(Path(__file__).resolve().parent))  # Resolves Jupyter error
 if _odoo_path:
     sys.path.append(_odoo_path)
 
-import odoo
-from odoo import api, SUPERUSER_ID
+try:
+    import odoo
+    from odoo import api, SUPERUSER_ID
+except ImportError as e:
+    raise ImportError(
+        "Could not import Odoo: no installation was auto-discovered and Odoo "
+        "is not installed in this Python environment. Set the ODOO_PATH "
+        "and/or ODOO_CONF environment variables to point at your Odoo "
+        "installation, or install Odoo in this environment."
+    ) from e
 
-# Module-level defaults used by Tools.__init__ when the caller does not specify them
-odoo_conf = _odoo_conf or ""
+# Cached parse of the version numbers compared against on every report/XML call
+_V14 = pkg_version.parse('14.0')
+_V15 = pkg_version.parse('15.0')
+_V17 = pkg_version.parse('17.0')
+
+# Conf files already handed to odoo.tools.config.parse_config(), so repeated
+# Tools() instantiations against the same conf don't re-read it from disk.
+_parsed_confs = set()
+
+
+def _resolve_default_conf():
+    """Return the conf path to use when Tools() is called without one.
+
+    Re-checks ODOO_CONF so it can be set after this module was imported
+    (e.g. in a notebook), without redoing the full (glob-based) discovery.
+    """
+    env_conf = os.getenv('ODOO_CONF')
+    if env_conf and Path(env_conf).is_file():
+        return env_conf
+    return _odoo_conf or ""
 
 
 class Tools:
 
-    def __init__(self, db_name, odoo_conf=odoo_conf, uid=SUPERUSER_ID, context=None):
+    def __init__(self, db_name, odoo_conf=None, uid=SUPERUSER_ID, context=None):
+        # Set upfront so close()/__del__ never fail with AttributeError if
+        # construction raises partway through (e.g. unknown db_name).
+        self.env = None
+        self._env_manager = None
+
         if context is None:
             context = {'lang': 'es_ES'}
-        odoo.tools.config.parse_config(['-c', odoo_conf])
+        if odoo_conf is None:
+            odoo_conf = _resolve_default_conf()
+        if odoo_conf not in _parsed_confs:
+            odoo.tools.config.parse_config(['-c', odoo_conf])
+            _parsed_confs.add(odoo_conf)
         self._odoo_version = pkg_version.parse(odoo.release.version)
         registry = odoo.modules.registry.Registry(db_name)
         cursor = registry.cursor()
@@ -38,15 +74,14 @@ class Tools:
         # api.Environment.__new__ raises AttributeError: 'environments'.
         # Entering manage() initialises the stack for the current greenlet/thread.
         # The method no longer exists in Odoo 15+, so we guard with hasattr().
-        self._env_manager = None
-        if hasattr(api.Environment, 'manage') and self._odoo_version < pkg_version.parse('15.0'):
+        if hasattr(api.Environment, 'manage') and self._odoo_version < _V15:
             self._env_manager = api.Environment.manage()
             self._env_manager.__enter__()
 
         self.env = api.Environment(cursor, uid, context)
 
     def close(self):
-        if self.env.cr and not self.env.cr.closed:
+        if self.env is not None and not self.env.cr.closed:
             self.env.cr.close()
             print("Cursor closed.")
         if self._env_manager is not None:
@@ -91,9 +126,9 @@ class Tools:
         # Odoo 12-13: render_qweb_pdf (public) on the report record
         # Odoo 14-16: _render_qweb_pdf on the report record
         # Odoo 17+:   _render_qweb_pdf as @api.model with explicit report_ref
-        if self._odoo_version >= pkg_version.parse('17.0'):
+        if self._odoo_version >= _V17:
             pdf_content, _ = self.env['ir.actions.report']._render_qweb_pdf(report, [res_id])
-        elif self._odoo_version >= pkg_version.parse('14.0'):
+        elif self._odoo_version >= _V14:
             pdf_content, _ = report._render_qweb_pdf([res_id])
         else:
             pdf_content, _ = report.render_qweb_pdf([res_id])
@@ -111,7 +146,7 @@ class Tools:
         :param file_name: Path to the XML file as listed in the module manifest
         """
         # convert_file first argument changed in Odoo 17: env instead of cr
-        if self._odoo_version >= pkg_version.parse('17.0'):
+        if self._odoo_version >= _V17:
             odoo.tools.convert_file(self.env, module_name, file_name, {})
         else:
             odoo.tools.convert_file(self.env.cr, module_name, file_name, {})
@@ -165,12 +200,17 @@ class Tools:
         """
         if isinstance(module, str):
             module = [module]
+
+        found = self.env['ir.module.module'].search([('name', 'in', module)])
+        found_names = set(found.mapped('name'))
         for mod in module:
-            module_id = self.env['ir.module.module'].search([('name', '=', mod)])
-            if module_id and module_id.state in ('installed', 'to upgrade'):
-                print(f"Uninstalling {module_id.name}.")
-                module_id.sudo().button_immediate_uninstall()
-            elif not module_id:
+            if mod not in found_names:
                 print(f"Module {mod} not found.")
-            else:
-                print(f"Module {mod} is not installed.")
+
+        to_uninstall = found.filtered(lambda m: m.state in ('installed', 'to upgrade'))
+        for mod in found - to_uninstall:
+            print(f"Module {mod.name} is not installed.")
+
+        if to_uninstall:
+            print(f"Uninstalling {to_uninstall.mapped('name')}.")
+            to_uninstall.sudo().button_immediate_uninstall()

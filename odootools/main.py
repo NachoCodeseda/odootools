@@ -22,6 +22,12 @@ from . import ui
 
 _logger = logging.getLogger(__name__)
 
+if not logging.getLogger().handlers:
+    # Odoo's own logging setup (odoo.netsvc.init_logger) is never invoked by
+    # this standalone CLI, so without this the _logger.info/warning/error
+    # calls below are silently dropped by Python's default logging config.
+    logging.basicConfig(level=logging.INFO, format='%(levelname)s %(name)s: %(message)s')
+
 RED_TEXT = "\033[91m{}\033[0m"
 GREEN_TEXT = "\033[92m{}\033[0m"
 BLUE_TEXT = "\033[94m{}\033[0m"
@@ -30,11 +36,6 @@ YELLOW_TEXT = "\033[93m{}\033[0m"
 ODOO_PATH = None
 ODOO_CONF = None
 ODOO_PATHS = []
-
-
-def _pg_quote_ident(name):
-    """Quote a PostgreSQL identifier to prevent SQL injection."""
-    return '"' + name.replace('"', '""') + '"'
 
 
 def _validate_db_name(name):
@@ -106,7 +107,7 @@ def main():
         try:
             from odoo.tools.misc import exec_pg_environ, find_pg_tool
             SUBPROCESS_ENV = exec_pg_environ()
-        except (ImportError, Exception):
+        except Exception:
             SUBPROCESS_ENV = {**os.environ}
             if odoo.tools.config.get('db_password'):
                 SUBPROCESS_ENV['PGPASSWORD'] = odoo.tools.config['db_password']
@@ -161,13 +162,12 @@ def main():
         readline.set_completer(func)
 
     def pg_terminate_backend(db_name):
-        # Single-quote escaping for string literals in SQL (doubling single quotes is the SQL standard)
-        escaped = db_name.replace("'", "''")
-        cmd = [
-            'psql', '-d', 'postgres', '-c',
-            f"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '{escaped}';"
-        ]
-        subprocess.run(cmd, check=True, env=SUBPROCESS_ENV)
+        db = odoo.sql_db.db_connect('postgres')
+        with closing(db.cursor()) as cr:
+            cr.execute(
+                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = %s",
+                (db_name,),
+            )
 
     def _check_faketime_mode(db_name):
         if os.getenv('ODOO_FAKETIME_TEST_MODE') and db_name in odoo.tools.config['db_name'].split(','):
@@ -234,8 +234,10 @@ def main():
     def restore_db(db, dump_file):
         """Override of odoo.service.db.restore_db to ensure the filestore is restored."""
         try:
-            assert isinstance(db, str)
-            if exp_db_exist(db):
+            if not isinstance(db, str):
+                raise TypeError(f"db must be a string, got {type(db).__name__}")
+            _validate_db_name(db)
+            if odoo.service.db.exp_db_exist(db):
                 _logger.warning('RESTORE DB: %s already exists', db)
                 return False
 
@@ -356,7 +358,7 @@ def main():
             db_user = config.get('options', 'db_user', fallback=None)
             next_db_name = input('Enter the name of the new DB: ')
 
-            if exp_db_exist(next_db_name):
+            if odoo.service.db.exp_db_exist(next_db_name):
                 print(RED_TEXT.format(f'The DB {next_db_name} already exists'))
                 return
 
@@ -369,38 +371,39 @@ def main():
 
             pg_terminate_backend(db_name)
 
-            # Quoted identifiers prevent SQL injection
-            sql_query = "CREATE DATABASE {} WITH TEMPLATE {} OWNER {};".format(
-                _pg_quote_ident(next_db_name),
-                _pg_quote_ident(db_name),
-                _pg_quote_ident(db_user) if db_user else 'CURRENT_USER',
+            owner_clause = psql_sql.Identifier(db_user) if db_user else psql_sql.SQL('CURRENT_USER')
+            query = psql_sql.SQL("CREATE DATABASE {} WITH TEMPLATE {} OWNER {}").format(
+                psql_sql.Identifier(next_db_name),
+                psql_sql.Identifier(db_name),
+                owner_clause,
             )
-            print(sql_query)
-            cmd = ["psql", "-d", "postgres", "-c", sql_query]
-
-            with subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, bufsize=1, env=SUBPROCESS_ENV
-            ) as p:
-                for line in p.stdout:
-                    print(line, end="")
-                p.wait()
-                if p.returncode != 0:
-                    return
+            print(BLUE_TEXT.format(f"Creating database {next_db_name} from template {db_name}..."))
+            db_conn = odoo.sql_db.db_connect('postgres')
+            with closing(db_conn.cursor()) as cr:
+                cr._cnx.autocommit = True
+                cr.execute(query)
 
             data_dir = odoo.tools.config.get('data_dir')
             src_filestore = os.path.join(data_dir, 'filestore', db_name)
             dst_filestore = os.path.join(data_dir, 'filestore', next_db_name)
 
-            total_size = sum(
-                os.path.getsize(os.path.join(root, f))
-                for root, _, files in os.walk(src_filestore)
-                for f in files
-            )
+            file_sizes = {}
+            for root, _, files in os.walk(src_filestore):
+                for f in files:
+                    path = os.path.join(root, f)
+                    file_sizes[path] = os.path.getsize(path)
+            total_size = sum(file_sizes.values())
 
             def copy_with_progress(src, dst):
-                shutil.copy2(src, dst)
-                pbar.update(os.path.getsize(src))
+                # Filestore files are content-addressed and immutable (named
+                # after their own checksum), so a hardlink is equivalent to a
+                # copy but avoids duplicating the data on disk. Falls back to
+                # a real copy when src/dst are on different filesystems.
+                try:
+                    os.link(src, dst)
+                except OSError:
+                    shutil.copy2(src, dst)
+                pbar.update(file_sizes.get(src, 0) or os.path.getsize(src))
 
             print(GREEN_TEXT.format("Copying filestore..."))
             with tqdm(total=total_size, unit='B', unit_scale=True, unit_divisor=1024) as pbar:
@@ -467,21 +470,21 @@ def main():
             print(traceback.format_exc())
 
     def change_db_user(db_name):
-        cmd = [
-            'psql',
-            '-d', 'postgres',
-            "-t", "-A", "--no-psqlrc",
-            '-c',
-            'SELECT rolname FROM pg_roles WHERE rolcanlogin = true ORDER BY rolname;',
-        ]
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True, env=SUBPROCESS_ENV)
-        users = [u for u in result.stdout.strip().split("\n") if u]
+        db = odoo.sql_db.db_connect('postgres')
+        with closing(db.cursor()) as cr:
+            cr.execute("SELECT rolname FROM pg_roles WHERE rolcanlogin = true ORDER BY rolname")
+            users = [row[0] for row in cr.fetchall()]
         users.append('Cancel')
         user = ui.select(users, prompt="Select the new DB user:")
         if user == 'Cancel':
             return
-        cmd = ['psql', '-d', 'postgres', '-c', f"ALTER DATABASE {_pg_quote_ident(db_name)} OWNER TO {_pg_quote_ident(user)};"]
-        subprocess.run(cmd, capture_output=True, check=True, env=SUBPROCESS_ENV)
+        with closing(db.cursor()) as cr:
+            cr.execute(
+                psql_sql.SQL("ALTER DATABASE {} OWNER TO {}").format(
+                    psql_sql.Identifier(db_name), psql_sql.Identifier(user)
+                )
+            )
+            cr.commit()
         print(GREEN_TEXT.format(f"DB {db_name} owner changed to {user}."))
 
     def print_modules(modules):
@@ -493,12 +496,20 @@ def main():
             row = indexed_names[i:i + columns]
             print("".join(cell.ljust(max_cell_length) for cell in row))
 
+    modules_updated_env = None
+
     def select_module(env, state, selection_text):
-        print(YELLOW_TEXT.format('Updating modules list...'))
-        try:
-            env['base.module.update'].create({}).update_module()
-        except Exception:
-            pass
+        nonlocal modules_updated_env
+        if modules_updated_env is not env:
+            # Rescans the addons path on disk, which is expensive: only do it
+            # once per environment (i.e. once per "Get Environment"/DB), not
+            # every time this submenu is opened.
+            print(YELLOW_TEXT.format('Updating modules list...'))
+            try:
+                env['base.module.update'].create({}).update_module()
+            except Exception:
+                pass
+            modules_updated_env = env
         print("******************************")
         modules = env['ir.module.module'].search_read([('state', 'in', state)], ['name'])
         print_modules(modules)
