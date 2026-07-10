@@ -11,7 +11,6 @@ import tempfile
 import configparser
 from contextlib import closing
 from pathlib import Path
-from bullet import Bullet, YesNo
 from datetime import datetime
 import logging
 import psycopg2
@@ -19,6 +18,7 @@ from tqdm import tqdm
 from psycopg2 import sql as psql_sql
 import base64
 from .discovery import discover_all_installations, find_conf_file
+from . import ui
 
 _logger = logging.getLogger(__name__)
 
@@ -59,7 +59,7 @@ def main():
         if len(ODOO_PATHS) == 1:
             ODOO_PATH = ODOO_PATHS[0]
         elif len(ODOO_PATHS) > 1:
-            ODOO_PATH = Bullet("Select Odoo path:", choices=ODOO_PATHS).launch()
+            ODOO_PATH = ui.select(ODOO_PATHS, prompt="Select Odoo path:")
         else:
             ODOO_PATH = input(
                 'No Odoo installation found automatically.\n'
@@ -269,9 +269,9 @@ def main():
                 # Determine whether neutralization is supported in this Odoo version
                 neutralize_database = False
                 sig = inspect.signature(odoo.service.db.restore_db)
-                copy = YesNo('Is it a copy?', 'y').launch()
+                copy = ui.confirm('Is it a copy?', 'y')
                 if len(sig.parameters) >= 4:
-                    neutralize_database = YesNo('Neutralize DB?:', 'n').launch()
+                    neutralize_database = ui.confirm('Neutralize DB?:', 'n')
 
                 if filestore_path:
                     data_dir = odoo.tools.config.get('data_dir')
@@ -306,7 +306,7 @@ def main():
             return False
 
     def drop_db(db_name):
-        if YesNo(RED_TEXT.format(f"Are you sure you want to drop database {db_name}?")).launch():
+        if ui.confirm(RED_TEXT.format(f"Are you sure you want to drop database {db_name}?")):
             print(RED_TEXT.format("Dropping database..."))
             try:
                 odoo.service.db.exp_drop(db_name)
@@ -331,7 +331,7 @@ def main():
         try:
             sig = inspect.signature(odoo.service.db.exp_duplicate_database)
             if len(sig.parameters) >= 3:
-                neutralize_database = YesNo('Neutralize DB?:', 'n').launch()
+                neutralize_database = ui.confirm('Neutralize DB?:', 'n')
                 odoo.service.db.exp_duplicate_database(db_name, new_db_name, neutralize_database)
             else:
                 odoo.service.db.exp_duplicate_database(db_name, new_db_name)
@@ -345,7 +345,7 @@ def main():
                 print(RED_TEXT.format("No other Odoo installation found to send the DB to."))
                 return
 
-            to = Bullet("Select destination Odoo path:", choices=ODOO_PATHS).launch()
+            to = ui.select(ODOO_PATHS, prompt="Select destination Odoo path:")
             odoo_conf_dest = os.path.join(os.path.dirname(to), 'odoo.conf')
 
             if not os.path.isfile(odoo_conf_dest):
@@ -477,7 +477,7 @@ def main():
         result = subprocess.run(cmd, capture_output=True, text=True, check=True, env=SUBPROCESS_ENV)
         users = [u for u in result.stdout.strip().split("\n") if u]
         users.append('Cancel')
-        user = Bullet("Select the new DB user:", choices=users).launch()
+        user = ui.select(users, prompt="Select the new DB user:")
         if user == 'Cancel':
             return
         cmd = ['psql', '-d', 'postgres', '-c', f"ALTER DATABASE {_pg_quote_ident(db_name)} OWNER TO {_pg_quote_ident(user)};"]
@@ -523,7 +523,7 @@ def main():
         except TypeError:
             dbs = odoo.service.db.list_dbs()
         dbs.append('Cancel')
-        option = Bullet(choices=dbs).launch()
+        option = ui.select(dbs)
         clear()
         if option == 'Cancel':
             return None
@@ -554,7 +554,7 @@ def main():
             if env:
                 prompt = f"Odootools (env: {BLUE_TEXT.format(env.cr.dbname)})"
 
-            option = Bullet(prompt=prompt, choices=options).launch()
+            option = ui.select(options, prompt=prompt)
             clear()
 
             if option == 'Restore DB':
@@ -640,9 +640,9 @@ def main():
                 )
                 if module_ids is None:
                     continue
-                if not YesNo(RED_TEXT.format(
+                if not ui.confirm(RED_TEXT.format(
                     f'Are you sure you want to uninstall {[m.name for m in module_ids]}?: '
-                )).launch():
+                )):
                     continue
                 clear()
                 try:
