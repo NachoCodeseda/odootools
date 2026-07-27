@@ -2,7 +2,6 @@ import sys
 import os
 import re
 import inspect
-import readline
 import traceback
 import zipfile
 import shutil
@@ -48,9 +47,10 @@ def _validate_db_name(name):
 
 
 def main():
+    ui.run_session(_run)
 
-    def clear():
-        os.system('clear')
+
+def _run():
 
     def get_odoo_path():
         global ODOO_PATH, ODOO_CONF, ODOO_PATHS
@@ -62,9 +62,10 @@ def main():
         elif len(ODOO_PATHS) > 1:
             ODOO_PATH = ui.select(ODOO_PATHS, prompt="Select Odoo path:")
         else:
-            ODOO_PATH = input(
+            ODOO_PATH = ui.prompt(
                 'No Odoo installation found automatically.\n'
-                'Specify the path to the directory containing odoo-bin: '
+                'Specify the path to the directory containing odoo-bin: ',
+                suggester=ui.path_suggester(),
             ).strip()
             # Accept both /opt/odoo18 and /opt/odoo18/odoo
             if os.path.exists(os.path.join(ODOO_PATH, 'odoo', 'odoo-bin')):
@@ -72,9 +73,11 @@ def main():
 
         ODOO_CONF = find_conf_file(ODOO_PATH)
         if not ODOO_CONF:
-            ODOO_CONF = input("Specify the path to the Odoo conf file: ").strip()
+            ODOO_CONF = ui.prompt(
+                "Specify the path to the Odoo conf file: ", suggester=ui.path_suggester()
+            ).strip()
 
-        clear()
+        ui.clear()
         print(GREEN_TEXT.format(f"Odoo path: {ODOO_PATH}"))
         print(GREEN_TEXT.format(f"Odoo conf: {ODOO_CONF}"))
 
@@ -123,43 +126,6 @@ def main():
 
     except Exception as e:
         print(e)
-
-    def path_completer(text, state):
-        """Complete absolute or relative paths."""
-        expanded_text = os.path.expanduser(text)
-        partial_dir = os.path.dirname(expanded_text)
-        if partial_dir == '':
-            partial_dir = '.'
-
-        try:
-            files = os.listdir(partial_dir)
-        except FileNotFoundError:
-            return None
-
-        complete_files = [
-            os.path.join(partial_dir, f)
-            for f in files
-            if f.startswith(os.path.basename(expanded_text))
-        ]
-        results = [x + '/' if os.path.isdir(x) else x for x in complete_files]
-
-        if state < len(results):
-            return results[state]
-        return None
-
-    def make_modules_completer(modules):
-        def modules_completer(text, state):
-            matches = [s for s in modules if s.startswith(text)]
-            try:
-                return matches[state]
-            except IndexError:
-                return None
-        return modules_completer
-
-    def set_completer(func):
-        readline.set_completer_delims(' \t\n;')
-        readline.parse_and_bind("tab: complete")
-        readline.set_completer(func)
 
     def pg_terminate_backend(db_name):
         db = odoo.sql_db.db_connect('postgres')
@@ -317,7 +283,9 @@ def main():
                 print(traceback.format_exc())
 
     def dump_db(db_name):
-        backup_file = input(f'Specify the path to the backup (default: {db_name}.zip): ') or f"{db_name}.zip"
+        backup_file = ui.prompt(
+            f'Specify the path to the backup (default: {db_name}.zip): ', suggester=ui.path_suggester()
+        ) or f"{db_name}.zip"
         if not backup_file.endswith('.zip'):
             backup_file += '.zip'
         try:
@@ -329,7 +297,7 @@ def main():
         print(f"Database {db_name} dumped to {backup_file}.")
 
     def duplicate_db(db_name):
-        new_db_name = input('Enter the name of the new DB: ')
+        new_db_name = ui.prompt('Enter the name of the new DB: ')
         try:
             sig = inspect.signature(odoo.service.db.exp_duplicate_database)
             if len(sig.parameters) >= 3:
@@ -351,12 +319,14 @@ def main():
             odoo_conf_dest = os.path.join(os.path.dirname(to), 'odoo.conf')
 
             if not os.path.isfile(odoo_conf_dest):
-                odoo_conf_dest = input("Specify the path to destination Odoo conf file: ")
+                odoo_conf_dest = ui.prompt(
+                    "Specify the path to destination Odoo conf file: ", suggester=ui.path_suggester()
+                )
 
             config = configparser.ConfigParser()
             config.read(odoo_conf_dest)
             db_user = config.get('options', 'db_user', fallback=None)
-            next_db_name = input('Enter the name of the new DB: ')
+            next_db_name = ui.prompt('Enter the name of the new DB: ')
 
             if odoo.service.db.exp_db_exist(next_db_name):
                 print(RED_TEXT.format(f'The DB {next_db_name} already exists'))
@@ -438,7 +408,9 @@ def main():
 
         if not os.path.exists(openupgrade_path):
             print(RED_TEXT.format(f"OpenUpgrade path not found: {openupgrade_path}"))
-            openupgrade_path = input("Specify the path to OpenUpgrade scripts: ")
+            openupgrade_path = ui.prompt(
+                "Specify the path to OpenUpgrade scripts: ", suggester=ui.path_suggester()
+            )
         if not os.path.exists(odoobin_path):
             print(RED_TEXT.format(f"odoo-bin not found at: {odoobin_path}"))
             return
@@ -487,15 +459,6 @@ def main():
             cr.commit()
         print(GREEN_TEXT.format(f"DB {db_name} owner changed to {user}."))
 
-    def print_modules(modules):
-        module_names = [m['name'] for m in modules]
-        columns = 3
-        indexed_names = [f"{i + 1}) {name}" for i, name in enumerate(module_names)]
-        max_cell_length = max((len(s) for s in indexed_names), default=20) + 2
-        for i in range(0, len(indexed_names), columns):
-            row = indexed_names[i:i + columns]
-            print("".join(cell.ljust(max_cell_length) for cell in row))
-
     modules_updated_env = None
 
     def select_module(env, state, selection_text):
@@ -510,17 +473,13 @@ def main():
             except Exception:
                 pass
             modules_updated_env = env
-        print("******************************")
         modules = env['ir.module.module'].search_read([('state', 'in', state)], ['name'])
-        print_modules(modules)
-        set_completer(make_modules_completer([m['name'] for m in modules]))
-        user_input = input(selection_text)
-        if user_input == 'c':
+        selected_names = ui.multi_select([m['name'] for m in modules], prompt=selection_text)
+        if not selected_names:
             return None
 
-        modules_list = user_input.split()
         module_ids = env['ir.module.module'].search(
-            [('name', 'in', modules_list), ('state', 'in', state)]
+            [('name', 'in', selected_names), ('state', 'in', state)]
         )
         if not module_ids:
             print("Module not found.")
@@ -535,12 +494,11 @@ def main():
             dbs = odoo.service.db.list_dbs()
         dbs.append('Cancel')
         option = ui.select(dbs)
-        clear()
+        ui.clear()
         if option == 'Cancel':
             return None
         return option
 
-    set_completer(path_completer)
     env = None
 
     try:
@@ -559,22 +517,16 @@ def main():
             if env:
                 options += ['Uninstall Module', 'Install Module', 'Update Module', 'Export translation']
             options.append('Exit')
-            set_completer(path_completer)
-            print('#####################')
-            prompt = "Odootools"
-            if env:
-                prompt = f"Odootools (env: {BLUE_TEXT.format(env.cr.dbname)})"
 
-            option = ui.select(options, prompt=prompt)
-            clear()
+            option = ui.menu(options, env_name=env.cr.dbname if env else None)
+            ui.clear()
 
             if option == 'Restore DB':
-                set_completer(path_completer)
-                dump_path = input('Specify the file path: ')
+                dump_path = ui.prompt('Specify the file path: ', suggester=ui.path_suggester())
                 if not dump_path.endswith('.zip'):
                     print('The dump must be a .zip file')
                     continue
-                db_name = input('Enter the name of the database (c to cancel): ')
+                db_name = ui.prompt('Enter the name of the database (c to cancel): ')
                 if db_name == 'c':
                     continue
                 restore_db(db_name, dump_path)
@@ -647,7 +599,7 @@ def main():
                 module_ids = select_module(
                     env,
                     ['installed', 'to upgrade'],
-                    RED_TEXT.format('Specify the module(s) to uninstall (space-separated, c to cancel): '),
+                    RED_TEXT.format('Select the module(s) to uninstall'),
                 )
                 if module_ids is None:
                     continue
@@ -655,7 +607,7 @@ def main():
                     f'Are you sure you want to uninstall {[m.name for m in module_ids]}?: '
                 )):
                     continue
-                clear()
+                ui.clear()
                 try:
                     for module in module_ids:
                         print(RED_TEXT.format(f"Uninstalling module {module.name}..."))
@@ -668,11 +620,11 @@ def main():
                 module_ids = select_module(
                     env,
                     ['uninstalled'],
-                    GREEN_TEXT.format('Specify the module(s) to install (space-separated, c to cancel): '),
+                    GREEN_TEXT.format('Select the module(s) to install'),
                 )
                 if module_ids is None:
                     continue
-                clear()
+                ui.clear()
                 for module in module_ids:
                     try:
                         print(GREEN_TEXT.format(f"Installing module {module.name}..."))
@@ -685,11 +637,11 @@ def main():
                 module_ids = select_module(
                     env,
                     ['installed'],
-                    BLUE_TEXT.format('Specify the module(s) to update (space-separated, c to cancel): '),
+                    BLUE_TEXT.format('Select the module(s) to update'),
                 )
                 if module_ids is None:
                     continue
-                clear()
+                ui.clear()
                 for module in module_ids:
                     try:
                         print(BLUE_TEXT.format(f"Updating module {module.name}..."))
@@ -702,14 +654,16 @@ def main():
                 module_ids = select_module(
                     env,
                     ['installed'],
-                    BLUE_TEXT.format('Specify the module to export translation (c to cancel): '),
+                    BLUE_TEXT.format('Select the module(s) to export translation for'),
                 )
                 if module_ids is None:
                     continue
-                clear()
-                lang = input('Indicate the language (default: es_ES): ') or 'es_ES'
-                set_completer(path_completer)
-                export_path = input('Specify the destination path (default: es.po, c to cancel): ') or "es.po"
+                ui.clear()
+                lang = ui.prompt('Indicate the language (default: es_ES): ') or 'es_ES'
+                export_path = ui.prompt(
+                    'Specify the destination path (default: es.po, c to cancel): ',
+                    suggester=ui.path_suggester(),
+                ) or "es.po"
                 if export_path == 'c':
                     continue
                 if not export_path.endswith('.po'):

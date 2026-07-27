@@ -4,7 +4,7 @@ setup(
     name="odootools",
     version="1.1.7",
     packages=find_packages(),
-    install_requires=["packaging", "bullet", "tqdm"],
+    install_requires=["packaging", "textual", "tqdm"],
     entry_points={
         "console_scripts": [
             "otools = odootools.main:main"
