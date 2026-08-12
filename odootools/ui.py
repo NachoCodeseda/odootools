@@ -24,13 +24,14 @@ app's own asyncio loop is `App.call_from_thread` plus a worker running
 import concurrent.futures
 import os
 import threading
+from typing import Union
 
 from textual import events
 from textual.app import App, ComposeResult
-from textual.containers import Horizontal, Vertical
+from textual.containers import Grid, Horizontal, ScrollableContainer, Vertical
 from textual.screen import ModalScreen
 from textual.suggester import Suggester
-from textual.widgets import Button, Footer, Header, Input, Label, OptionList, RichLog, SelectionList
+from textual.widgets import Button, Checkbox, Footer, Header, Input, Label, OptionList, RichLog
 from textual.widgets.option_list import Option
 
 _CSS = """
@@ -67,7 +68,7 @@ class _PathSuggester(Suggester):
     def __init__(self):
         super().__init__(use_cache=False, case_sensitive=True)
 
-    async def get_suggestion(self, value: str) -> str | None:
+    async def get_suggestion(self, value: str) -> Union[str, None]:
         expanded = os.path.expanduser(value)
         directory = os.path.dirname(expanded) or '.'
         base = os.path.basename(expanded)
@@ -194,13 +195,34 @@ class _MenuScreen(_DialogScreen):
 
 
 class _MultiSelectScreen(_DialogScreen):
-    """Checkbox-style multi-select list.
+    """Checkbox grid: every choice in a single bordered, scrollable block,
+    laid out in several columns instead of one tall list.
 
-    Space toggles the highlighted item; the Confirm/Cancel buttons (also
-    reachable via Ctrl+S / Escape) close the dialog.
+    Space/Enter toggles the focused checkbox; Tab moves between them
+    (left-to-right, then down a row) and the whole grid shares one
+    scrollbar if it doesn't fit — unlike separate per-column widgets, which
+    would each scroll independently. Ctrl+S confirms, Escape cancels; the
+    Confirm/Cancel buttons do the same.
     """
 
+    _COLUMN_WIDTH = 24
+    _MAX_COLUMNS = 3
+    _MAX_ROWS = 12
+
     DEFAULT_CSS = """
+    _MultiSelectScreen #ui-grid-box {
+        width: auto;
+        max-width: 100vw;
+        height: auto;
+        max-height: 16;
+        border: round $accent;
+    }
+    _MultiSelectScreen #ui-grid {
+        height: auto;
+    }
+    _MultiSelectScreen #ui-grid Checkbox {
+        width: 24;
+    }
     _MultiSelectScreen #ui-dialog-buttons {
         width: auto;
         height: auto;
@@ -219,18 +241,32 @@ class _MultiSelectScreen(_DialogScreen):
 
     def __init__(self, choices, prompt=None):
         super().__init__()
-        self._choices = list(choices)
+        self._choices = sorted(choices, key=str.casefold)
         self._prompt = prompt
 
     def compose(self) -> ComposeResult:
         with Vertical():
-            hint = "space: toggle"
+            hint = "space: toggle · ctrl+s: confirm · esc: cancel"
             label = f"{self._prompt}\n({hint})" if self._prompt else hint
             yield Label(label, id="ui-prompt")
-            yield SelectionList(*((str(choice), choice) for choice in self._choices))
+
+            n = len(self._choices)
+            columns = min(self._MAX_COLUMNS, -(-n // self._MAX_ROWS)) or 1
+            with ScrollableContainer(id="ui-grid-box"):
+                grid = Grid(id="ui-grid")
+                grid.styles.grid_size_columns = columns
+                grid.styles.width = columns * self._COLUMN_WIDTH
+                with grid:
+                    for i, choice in enumerate(self._choices):
+                        yield Checkbox(choice, id=f"cb-{i}")
+
             with Horizontal(id="ui-dialog-buttons"):
                 yield Button("Confirm", variant="success", id="confirm-btn")
                 yield Button("Cancel", variant="error", id="cancel-btn")
+
+    def on_mount(self) -> None:
+        if self._choices:
+            self.query_one("#cb-0", Checkbox).focus()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "confirm-btn":
@@ -239,7 +275,11 @@ class _MultiSelectScreen(_DialogScreen):
             self.action_cancel()
 
     def action_confirm(self) -> None:
-        self.dismiss(self.query_one(SelectionList).selected)
+        selected = [
+            choice for i, choice in enumerate(self._choices)
+            if self.query_one(f"#cb-{i}", Checkbox).value
+        ]
+        self.dismiss(selected)
 
     def action_cancel(self) -> None:
         self.dismiss(None)
