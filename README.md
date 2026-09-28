@@ -90,20 +90,6 @@ with Tools('my_database') as tool:
     tool.uninstall_module(['mod_a', 'mod_b'])
 ```
 
-### XML record reload (report editor workflow)
-
-```py
-with Tools('my_database') as tool:
-    # Reload an XML file and regenerate a PDF on each iteration — useful for template development
-    tool.report_editor(
-        module_name='my_module',
-        report_file='report/my_report.xml',
-        action_xml_id='action_report_my_model',
-        res_id=1,
-        file_name='preview.pdf',
-    )
-```
-
 ---
 
 ## Compatibility

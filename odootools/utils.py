@@ -151,27 +151,6 @@ class Tools:
         else:
             odoo.tools.convert_file(self.env.cr, module_name, file_name, {})
 
-    def report_editor(self, module_name: str, report_file: str, action_xml_id: str, res_id: int, file_name: str):
-        """
-        Interactive loop that reloads XML records and regenerates a PDF report on each iteration.
-
-        :param module_name: Module containing the report template
-        :param report_file: XML file path within the module
-        :param action_xml_id: XML ID of the report action (without module prefix)
-        :param res_id: ID of the record to render
-        :param file_name: Destination PDF file path (must end with .pdf)
-        """
-        while True:
-            try:
-                self.update_records_from_xml(module_name, report_file)
-                self.print_report(f'{module_name}.{action_xml_id}', res_id, file_name)
-                if input("Press enter to continue (c to close): ") == 'c':
-                    break
-            except Exception:
-                print(traceback.format_exc())
-                if input("Press enter to continue (c to close): ") == 'c':
-                    break
-
     def print_sale_order(self, res_id: int):
         """Generates a sale order PDF report."""
         self.print_report('sale.action_report_saleorder', res_id, report_file='sale_order.pdf')
