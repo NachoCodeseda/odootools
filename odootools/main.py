@@ -22,6 +22,10 @@ from . import ui
 
 _logger = logging.getLogger(__name__)
 
+# /tmp may be tmpfs (RAM-backed) and too small for large dumps/filestores.
+# Also applies to the TemporaryDirectory used inside odoo.service.db.dump_db.
+tempfile.tempdir = '/var/tmp'
+
 if not logging.getLogger().handlers:
     # Odoo's own logging setup (odoo.netsvc.init_logger) is never invoked by
     # this standalone CLI, so without this the _logger.info/warning/error
@@ -48,6 +52,10 @@ def _validate_db_name(name):
 
 
 def main():
+
+    if sys.argv[1:2] in (['-p'], ['--pathfinder']):
+        from .pathfinder import run
+        return run(sys.argv[2:])
 
     def clear():
         os.system('clear')
@@ -320,12 +328,18 @@ def main():
         backup_file = input(f'Specify the path to the backup (default: {db_name}.zip): ') or f"{db_name}.zip"
         if not backup_file.endswith('.zip'):
             backup_file += '.zip'
+        opened = False
         try:
             with open(backup_file, "wb") as destiny:
+                opened = True
                 print(BLUE_TEXT.format("Starting database dump..."))
                 odoo.service.db.dump_db(db_name, destiny, "zip")
         except Exception:
             print(traceback.format_exc())
+            if opened:
+                os.remove(backup_file)  # don't leave a truncated zip behind
+            print(RED_TEXT.format(f"Database {db_name} dump failed."))
+            return
         print(f"Database {db_name} dumped to {backup_file}.")
 
     def duplicate_db(db_name):

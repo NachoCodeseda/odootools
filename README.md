@@ -17,6 +17,14 @@ otools
 
 Select `Get Environment` to manage module installations and export translations
 
+### Pathfinder (no UI)
+
+Find the shortest relational paths between two models:
+
+```sh
+otools --pathfinder my_database account.move.line stock.warehouse
+```
+
 ![alt text](images/image-1.png)
 
 ---
