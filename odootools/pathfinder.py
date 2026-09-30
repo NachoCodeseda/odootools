@@ -1,14 +1,5 @@
-"""Find the shortest relational paths between two models (BFS over fields_get).
-
-Usage: otools --pathfinder <database> <origin_model> <destination_model>
-"""
-import argparse
-import contextlib
-import io
-import logging
+"""Find the shortest relational paths between two models (BFS over fields_get)."""
 from collections import deque
-
-import psycopg2
 
 
 def pathfinder(env, origin, destination):
@@ -58,30 +49,3 @@ def format_path(path):
         lines.append(f"  {i:>2}  {field:<30} {model:<35} {type_}")
     return '\n'.join(lines)
 
-
-def run(argv):
-    parser = argparse.ArgumentParser(
-        prog='otools --pathfinder',
-        description='Find the shortest paths between two models. '
-                    'Set ODOO_PATH/ODOO_CONF to choose the Odoo installation.',
-    )
-    parser.add_argument('database')
-    parser.add_argument('origin', help='Model to start from, e.g. sale.order')
-    parser.add_argument('destination', help='Model to end at, e.g. res.country')
-    args = parser.parse_args(argv)
-
-    # Only the result goes to the console: mute Odoo's logging (it never
-    # re-enables it) and Tools' "Cursor closed." print.
-    logging.disable(logging.CRITICAL)
-    from .utils import Tools  # imports odoo, keep it out of `--help`
-
-    with contextlib.redirect_stdout(io.StringIO()):
-        try:
-            with Tools(args.database) as tool:
-                paths = pathfinder(tool.get_env(), args.origin, args.destination)
-        except (ValueError, psycopg2.OperationalError) as e:
-            parser.exit(1, f"{str(e).strip()}\n")
-
-    if not paths:
-        parser.exit(1, f"No path found from {args.origin} to {args.destination}\n")
-    print('\n\n'.join(format_path(p) for p in paths))

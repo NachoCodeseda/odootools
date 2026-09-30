@@ -1,35 +1,16 @@
-import sys
 import os
-import re
-import inspect
 import readline
+import sys
 import traceback
-import zipfile
-import shutil
-import subprocess
-import tempfile
-import configparser
-from contextlib import closing
-from pathlib import Path
-from datetime import datetime
 import logging
-import psycopg2
-from tqdm import tqdm
-from psycopg2 import sql as psql_sql
-import base64
+
+from . import core, ui
 from .discovery import discover_all_installations, find_conf_file
-from . import ui
-
-_logger = logging.getLogger(__name__)
-
-# /tmp may be tmpfs (RAM-backed) and too small for large dumps/filestores.
-# Also applies to the TemporaryDirectory used inside odoo.service.db.dump_db.
-tempfile.tempdir = '/var/tmp'
 
 if not logging.getLogger().handlers:
     # Odoo's own logging setup (odoo.netsvc.init_logger) is never invoked by
     # this standalone CLI, so without this the _logger.info/warning/error
-    # calls below are silently dropped by Python's default logging config.
+    # calls in core are silently dropped by Python's default logging config.
     logging.basicConfig(level=logging.INFO, format='%(levelname)s %(name)s: %(message)s')
 
 RED_TEXT = "\033[91m{}\033[0m"
@@ -37,525 +18,156 @@ GREEN_TEXT = "\033[92m{}\033[0m"
 BLUE_TEXT = "\033[94m{}\033[0m"
 YELLOW_TEXT = "\033[93m{}\033[0m"
 
-ODOO_PATH = None
-ODOO_CONF = None
-ODOO_PATHS = []
+
+def clear():
+    os.system('clear')
 
 
-def _validate_db_name(name):
-    """Raise ValueError if the database name contains characters unsafe for SQL identifiers."""
-    if not re.match(r'^[a-zA-Z_][a-zA-Z0-9_\-]*$', name):
-        raise ValueError(
-            f"Invalid database name '{name}'. "
-            "Use only letters, digits, underscores, and hyphens."
-        )
+def path_completer(text, state):
+    """Complete absolute or relative paths."""
+    expanded_text = os.path.expanduser(text)
+    partial_dir = os.path.dirname(expanded_text)
+    if partial_dir == '':
+        partial_dir = '.'
+
+    try:
+        files = os.listdir(partial_dir)
+    except FileNotFoundError:
+        return None
+
+    complete_files = [
+        os.path.join(partial_dir, f)
+        for f in files
+        if f.startswith(os.path.basename(expanded_text))
+    ]
+    results = [x + '/' if os.path.isdir(x) else x for x in complete_files]
+
+    if state < len(results):
+        return results[state]
+    return None
+
+
+def make_modules_completer(modules):
+    def modules_completer(text, state):
+        matches = [s for s in modules if s.startswith(text)]
+        try:
+            return matches[state]
+        except IndexError:
+            return None
+    return modules_completer
+
+
+def set_completer(func):
+    readline.set_completer_delims(' \t\n;')
+    readline.parse_and_bind("tab: complete")
+    readline.set_completer(func)
+
+
+def print_modules(module_names):
+    columns = 3
+    indexed_names = [f"{i + 1}) {name}" for i, name in enumerate(module_names)]
+    max_cell_length = max((len(s) for s in indexed_names), default=20) + 2
+    for i in range(0, len(indexed_names), columns):
+        row = indexed_names[i:i + columns]
+        print("".join(cell.ljust(max_cell_length) for cell in row))
+
+
+def select_odoo_installation():
+    """Ask which Odoo to use. Returns (odoo_path, odoo_conf, all_installations)."""
+    odoo_paths = discover_all_installations()
+
+    if len(odoo_paths) == 1:
+        odoo_path = odoo_paths[0]
+    elif len(odoo_paths) > 1:
+        odoo_path = ui.select(odoo_paths, prompt="Select Odoo path:")
+    else:
+        odoo_path = input(
+            'No Odoo installation found automatically.\n'
+            'Specify the path to the directory containing odoo-bin: '
+        ).strip()
+        # Accept both /opt/odoo18 and /opt/odoo18/odoo
+        if os.path.exists(os.path.join(odoo_path, 'odoo', 'odoo-bin')):
+            odoo_path = os.path.join(odoo_path, 'odoo')
+
+    odoo_conf = find_conf_file(odoo_path)
+    if not odoo_conf:
+        odoo_conf = input("Specify the path to the Odoo conf file: ").strip()
+
+    clear()
+    print(GREEN_TEXT.format(f"Odoo path: {odoo_path}"))
+    print(GREEN_TEXT.format(f"Odoo conf: {odoo_conf}"))
+    return odoo_path, odoo_conf, odoo_paths
+
+
+def select_db():
+    dbs = core.list_dbs() + ['Cancel']
+    option = ui.select(dbs)
+    clear()
+    if option == 'Cancel':
+        return None
+    return option
+
+
+def attempt(func, *args, done=None, **kwargs):
+    """Run a core operation, printing the traceback instead of leaving the menu on failure."""
+    try:
+        func(*args, **kwargs)
+    except Exception:
+        print(traceback.format_exc())
+        return False
+    if done:
+        print(done)
+    return True
 
 
 def main():
+    if len(sys.argv) > 1:
+        from .cli import run
+        return run(sys.argv[1:])
 
-    if sys.argv[1:2] in (['-p'], ['--pathfinder']):
-        from .pathfinder import run
-        return run(sys.argv[2:])
-
-    def clear():
-        os.system('clear')
-
-    def get_odoo_path():
-        global ODOO_PATH, ODOO_CONF, ODOO_PATHS
-
-        ODOO_PATHS = discover_all_installations()
-
-        if len(ODOO_PATHS) == 1:
-            ODOO_PATH = ODOO_PATHS[0]
-        elif len(ODOO_PATHS) > 1:
-            ODOO_PATH = ui.select(ODOO_PATHS, prompt="Select Odoo path:")
-        else:
-            ODOO_PATH = input(
-                'No Odoo installation found automatically.\n'
-                'Specify the path to the directory containing odoo-bin: '
-            ).strip()
-            # Accept both /opt/odoo18 and /opt/odoo18/odoo
-            if os.path.exists(os.path.join(ODOO_PATH, 'odoo', 'odoo-bin')):
-                ODOO_PATH = os.path.join(ODOO_PATH, 'odoo')
-
-        ODOO_CONF = find_conf_file(ODOO_PATH)
-        if not ODOO_CONF:
-            ODOO_CONF = input("Specify the path to the Odoo conf file: ").strip()
-
-        clear()
-        print(GREEN_TEXT.format(f"Odoo path: {ODOO_PATH}"))
-        print(GREEN_TEXT.format(f"Odoo conf: {ODOO_CONF}"))
-
-    get_odoo_path()
-
-    # Fallbacks in case the try block below fails or the symbols are absent
-    # in an older Odoo version — must be defined before they are used as
-    # decorators/closures further down the function.
-    def check_db_management_enabled(fn):
-        return fn
-
-    SUBPROCESS_ENV = {**os.environ}
-
-    def find_pg_tool(tool):
-        return tool
-
+    odoo_path, odoo_conf, odoo_paths = select_odoo_installation()
     try:
-        sys.path.append(ODOO_PATH)
-        import odoo
-        # Odoo 19 is a namespace package (no __init__.py), so submodules are
-        # not auto-imported — we must import odoo.tools explicitly.
-        import odoo.tools
-        odoo.tools.config.parse_config(['-c', ODOO_CONF, '--logfile='])
-        from odoo import SUPERUSER_ID
-        import odoo.api
-        import odoo.modules.registry
-        import odoo.service.db
-        import odoo.sql_db
-
-        try:
-            from odoo.tools.misc import exec_pg_environ, find_pg_tool
-            SUBPROCESS_ENV = exec_pg_environ()
-        except Exception:
-            SUBPROCESS_ENV = {**os.environ}
-            if odoo.tools.config.get('db_password'):
-                SUBPROCESS_ENV['PGPASSWORD'] = odoo.tools.config['db_password']
-            if odoo.tools.config.get('db_host'):
-                SUBPROCESS_ENV['PGHOST'] = odoo.tools.config['db_host']
-            if odoo.tools.config.get('db_port'):
-                SUBPROCESS_ENV['PGPORT'] = str(odoo.tools.config['db_port'])
-            if odoo.tools.config.get('db_user'):
-                SUBPROCESS_ENV['PGUSER'] = odoo.tools.config['db_user']
-
-            def find_pg_tool(tool):
-                return tool
-
+        core.init(odoo_path, odoo_conf)
     except Exception as e:
         print(e)
+        return 1
 
-    def path_completer(text, state):
-        """Complete absolute or relative paths."""
-        expanded_text = os.path.expanduser(text)
-        partial_dir = os.path.dirname(expanded_text)
-        if partial_dir == '':
-            partial_dir = '.'
+    modules_updated_for = None
 
-        try:
-            files = os.listdir(partial_dir)
-        except FileNotFoundError:
-            return None
-
-        complete_files = [
-            os.path.join(partial_dir, f)
-            for f in files
-            if f.startswith(os.path.basename(expanded_text))
-        ]
-        results = [x + '/' if os.path.isdir(x) else x for x in complete_files]
-
-        if state < len(results):
-            return results[state]
-        return None
-
-    def make_modules_completer(modules):
-        def modules_completer(text, state):
-            matches = [s for s in modules if s.startswith(text)]
-            try:
-                return matches[state]
-            except IndexError:
-                return None
-        return modules_completer
-
-    def set_completer(func):
-        readline.set_completer_delims(' \t\n;')
-        readline.parse_and_bind("tab: complete")
-        readline.set_completer(func)
-
-    def pg_terminate_backend(db_name):
-        db = odoo.sql_db.db_connect('postgres')
-        with closing(db.cursor()) as cr:
-            cr.execute(
-                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = %s",
-                (db_name,),
-            )
-
-    def _check_faketime_mode(db_name):
-        if os.getenv('ODOO_FAKETIME_TEST_MODE') and db_name in odoo.tools.config['db_name'].split(','):
-            try:
-                db = odoo.sql_db.db_connect(db_name)
-                with db.cursor() as cursor:
-                    cursor.execute("SELECT (pg_catalog.now() AT TIME ZONE 'UTC');")
-                    server_now = cursor.fetchone()[0]
-                    time_offset = (datetime.now() - server_now).total_seconds()
-                    cursor.execute("""
-                        CREATE OR REPLACE FUNCTION public.now()
-                            RETURNS timestamp with time zone AS $$
-                                SELECT pg_catalog.now() + %s * interval '1 second';
-                            $$ LANGUAGE sql;
-                    """, (int(time_offset),))
-                    cursor.execute("SELECT (now() AT TIME ZONE 'UTC');")
-                    new_now = cursor.fetchone()[0]
-                    _logger.info("Faketime mode, new cursor now is %s", new_now)
-                    cursor.commit()
-            except psycopg2.Error as e:
-                _logger.warning("Unable to set faketimedNOW(): %s", e)
-
-    def _create_empty_database(name):
-        db = odoo.sql_db.db_connect('postgres')
-        with closing(db.cursor()) as cr:
-            chosen_template = odoo.tools.config['db_template']
-            cr.execute(
-                "SELECT datname FROM pg_database WHERE datname = %s",
-                (name,), log_exceptions=False
-            )
-            if cr.fetchall():
-                _check_faketime_mode(name)
-                raise Exception(f"database {name!r} already exists!")
-            else:
-                cr.rollback()
-                cr._cnx.autocommit = True
-                collate = psql_sql.SQL("LC_COLLATE 'C'" if chosen_template == 'template0' else "")
-                cr.execute(
-                    psql_sql.SQL("CREATE DATABASE {} ENCODING 'unicode' {} TEMPLATE {}").format(
-                        psql_sql.Identifier(name), collate, psql_sql.Identifier(chosen_template)
-                    )
-                )
-
-        try:
-            db = odoo.sql_db.db_connect(name)
-            with db.cursor() as cr:
-                cr.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
-                if odoo.tools.config['unaccent']:
-                    cr.execute("CREATE EXTENSION IF NOT EXISTS unaccent")
-                    cr.execute("ALTER FUNCTION unaccent(text) IMMUTABLE")
-        except psycopg2.Error as e:
-            _logger.warning("Unable to create PostgreSQL extensions: %s", e)
-        _check_faketime_mode(name)
-
-        # Restore legacy public schema access on PostgreSQL 15+
-        try:
-            db = odoo.sql_db.db_connect(name)
-            with db.cursor() as cr:
-                cr.execute("GRANT CREATE ON SCHEMA PUBLIC TO PUBLIC")
-        except psycopg2.Error as e:
-            _logger.warning("Unable to make public schema public-accessible: %s", e)
-
-    @check_db_management_enabled
-    def restore_db(db, dump_file):
-        """Override of odoo.service.db.restore_db to ensure the filestore is restored."""
-        try:
-            if not isinstance(db, str):
-                raise TypeError(f"db must be a string, got {type(db).__name__}")
-            _validate_db_name(db)
-            if odoo.service.db.exp_db_exist(db):
-                _logger.warning('RESTORE DB: %s already exists', db)
-                return False
-
-            _logger.info('RESTORING DB: %s', db)
-            _create_empty_database(db)
-
-            filestore_path = None
-            with tempfile.TemporaryDirectory() as dump_dir:
-                if zipfile.is_zipfile(dump_file):
-                    with zipfile.ZipFile(dump_file, 'r') as z:
-                        filestore = [m for m in z.namelist() if m.startswith('filestore/')]
-                        z.extractall(dump_dir, ['dump.sql'] + filestore)
-                        if filestore:
-                            filestore_path = os.path.join(dump_dir, 'filestore')
-                    pg_cmd = 'psql'
-                    pg_args = ['-q', '-f', os.path.join(dump_dir, 'dump.sql')]
-                else:
-                    pg_cmd = 'pg_restore'
-                    pg_args = ['--no-owner', dump_file]
-
-                r = subprocess.run(
-                    [find_pg_tool(pg_cmd), f'--dbname={db}', *pg_args],
-                    env=SUBPROCESS_ENV,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.STDOUT,
-                )
-                if r.returncode != 0:
-                    _logger.error("Couldn't restore database")
-                    return False
-
-                # Determine whether neutralization is supported in this Odoo version
-                neutralize_database = False
-                sig = inspect.signature(odoo.service.db.restore_db)
-                copy = ui.confirm('Is it a copy?', 'y')
-                if len(sig.parameters) >= 4:
-                    neutralize_database = ui.confirm('Neutralize DB?:', 'n')
-
-                if filestore_path:
-                    data_dir = odoo.tools.config.get('data_dir')
-                    filestore_dest = os.path.join(data_dir, 'filestore', db)
-                    shutil.move(filestore_path, filestore_dest)
-                    _logger.info('RESTORE DB: %s filestore restored', db)
-
-                try:
-                    registry = odoo.modules.registry.Registry.new(db)
-                    with registry.cursor() as cr:
-                        if neutralize_database:
-                            try:
-                                odoo.modules.neutralize.neutralize_database(cr)
-                            except (AttributeError, ImportError):
-                                _logger.warning(
-                                    "Database neutralization not available in this Odoo version"
-                                )
-                        env = odoo.api.Environment(cr, 1, {})
-                        if copy:
-                            try:
-                                env['ir.config_parameter'].init(force=True)
-                            except Exception:
-                                pass
-                except Exception:
-                    pass
-
-            _logger.info('RESTORE DB: %s done', db)
-            return True
-
-        except Exception:
-            _logger.error(traceback.format_exc())
-            return False
-
-    def drop_db(db_name):
-        if ui.confirm(RED_TEXT.format(f"Are you sure you want to drop database {db_name}?")):
-            print(RED_TEXT.format("Dropping database..."))
-            try:
-                odoo.service.db.exp_drop(db_name)
-                print(RED_TEXT.format(f"Database {db_name} dropped."))
-            except Exception:
-                print(traceback.format_exc())
-
-    def dump_db(db_name):
-        backup_file = input(f'Specify the path to the backup (default: {db_name}.zip): ') or f"{db_name}.zip"
-        if not backup_file.endswith('.zip'):
-            backup_file += '.zip'
-        opened = False
-        try:
-            with open(backup_file, "wb") as destiny:
-                opened = True
-                print(BLUE_TEXT.format("Starting database dump..."))
-                odoo.service.db.dump_db(db_name, destiny, "zip")
-        except Exception:
-            print(traceback.format_exc())
-            if opened:
-                os.remove(backup_file)  # don't leave a truncated zip behind
-            print(RED_TEXT.format(f"Database {db_name} dump failed."))
-            return
-        print(f"Database {db_name} dumped to {backup_file}.")
-
-    def duplicate_db(db_name):
-        new_db_name = input('Enter the name of the new DB: ')
-        try:
-            sig = inspect.signature(odoo.service.db.exp_duplicate_database)
-            if len(sig.parameters) >= 3:
-                neutralize_database = ui.confirm('Neutralize DB?:', 'n')
-                odoo.service.db.exp_duplicate_database(db_name, new_db_name, neutralize_database)
-            else:
-                odoo.service.db.exp_duplicate_database(db_name, new_db_name)
-            print(GREEN_TEXT.format(f"Database {db_name} duplicated to {new_db_name}."))
-        except Exception:
-            print(traceback.format_exc())
-
-    def send_db(db_name):
-        try:
-            if len(ODOO_PATHS) < 2:
-                print(RED_TEXT.format("No other Odoo installation found to send the DB to."))
-                return
-
-            to = ui.select(ODOO_PATHS, prompt="Select destination Odoo path:")
-            odoo_conf_dest = os.path.join(os.path.dirname(to), 'odoo.conf')
-
-            if not os.path.isfile(odoo_conf_dest):
-                odoo_conf_dest = input("Specify the path to destination Odoo conf file: ")
-
-            config = configparser.ConfigParser()
-            config.read(odoo_conf_dest)
-            db_user = config.get('options', 'db_user', fallback=None)
-            next_db_name = input('Enter the name of the new DB: ')
-
-            if odoo.service.db.exp_db_exist(next_db_name):
-                print(RED_TEXT.format(f'The DB {next_db_name} already exists'))
-                return
-
-            try:
-                _validate_db_name(next_db_name)
-                _validate_db_name(db_name)
-            except ValueError as e:
-                print(RED_TEXT.format(str(e)))
-                return
-
-            pg_terminate_backend(db_name)
-
-            owner_clause = psql_sql.Identifier(db_user) if db_user else psql_sql.SQL('CURRENT_USER')
-            query = psql_sql.SQL("CREATE DATABASE {} WITH TEMPLATE {} OWNER {}").format(
-                psql_sql.Identifier(next_db_name),
-                psql_sql.Identifier(db_name),
-                owner_clause,
-            )
-            print(BLUE_TEXT.format(f"Creating database {next_db_name} from template {db_name}..."))
-            db_conn = odoo.sql_db.db_connect('postgres')
-            with closing(db_conn.cursor()) as cr:
-                cr._cnx.autocommit = True
-                cr.execute(query)
-
-            data_dir = odoo.tools.config.get('data_dir')
-            src_filestore = os.path.join(data_dir, 'filestore', db_name)
-            dst_filestore = os.path.join(data_dir, 'filestore', next_db_name)
-
-            file_sizes = {}
-            for root, _, files in os.walk(src_filestore):
-                for f in files:
-                    path = os.path.join(root, f)
-                    file_sizes[path] = os.path.getsize(path)
-            total_size = sum(file_sizes.values())
-
-            def copy_with_progress(src, dst):
-                # Filestore files are content-addressed and immutable (named
-                # after their own checksum), so a hardlink is equivalent to a
-                # copy but avoids duplicating the data on disk. Falls back to
-                # a real copy when src/dst are on different filesystems.
-                try:
-                    os.link(src, dst)
-                except OSError:
-                    shutil.copy2(src, dst)
-                pbar.update(file_sizes.get(src, 0) or os.path.getsize(src))
-
-            print(GREEN_TEXT.format("Copying filestore..."))
-            with tqdm(total=total_size, unit='B', unit_scale=True, unit_divisor=1024) as pbar:
-                shutil.copytree(
-                    src_filestore, dst_filestore,
-                    copy_function=copy_with_progress,
-                    dirs_exist_ok=True,
-                )
-
-            print(GREEN_TEXT.format("DB copied."))
-
-        except Exception:
-            print(traceback.format_exc())
-
-    def migrate_db(db_name):
-
-        def colorize(line):
-            if "ERROR" in line or "CRITICAL" in line:
-                return f"\033[91m{line}\033[0m"
-            elif "WARNING" in line:
-                return f"\033[93m{line}\033[0m"
-            elif "DEBUG" in line:
-                return f"\033[94m{line}\033[0m"
-            return line
-
-        print(RED_TEXT.format("Migrating database..."))
-        openupgrade_path = os.path.join(
-            os.path.dirname(ODOO_PATH), 'custom_addons', 'oca', 'OpenUpgrade',
-            'openupgrade_scripts', 'scripts'
-        )
-        odoobin_path = os.path.join(ODOO_PATH, 'odoo-bin')
-
-        if not os.path.exists(openupgrade_path):
-            print(RED_TEXT.format(f"OpenUpgrade path not found: {openupgrade_path}"))
-            openupgrade_path = input("Specify the path to OpenUpgrade scripts: ")
-        if not os.path.exists(odoobin_path):
-            print(RED_TEXT.format(f"odoo-bin not found at: {odoobin_path}"))
-            return
-
-        try:
-            cmd = [
-                odoobin_path,
-                "-c", ODOO_CONF,
-                "-d", db_name,
-                f"--upgrade-path={openupgrade_path}",
-                "--update", "all",
-                "--stop-after-init",
-                "--load=base,web,openupgrade_framework",
-            ]
-            print(BLUE_TEXT.format(str(cmd)))
-            with subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
-            ) as p:
-                for line in p.stdout:
-                    print(colorize(line), end="")
-                p.wait()
-                if p.returncode != 0:
-                    print(RED_TEXT.format("Migration ended with errors."))
-                    return
-
-            print(GREEN_TEXT.format(f"Database {db_name} migrated."))
-
-        except Exception:
-            print(traceback.format_exc())
-
-    def change_db_user(db_name):
-        db = odoo.sql_db.db_connect('postgres')
-        with closing(db.cursor()) as cr:
-            cr.execute("SELECT rolname FROM pg_roles WHERE rolcanlogin = true ORDER BY rolname")
-            users = [row[0] for row in cr.fetchall()]
-        users.append('Cancel')
-        user = ui.select(users, prompt="Select the new DB user:")
-        if user == 'Cancel':
-            return
-        with closing(db.cursor()) as cr:
-            cr.execute(
-                psql_sql.SQL("ALTER DATABASE {} OWNER TO {}").format(
-                    psql_sql.Identifier(db_name), psql_sql.Identifier(user)
-                )
-            )
-            cr.commit()
-        print(GREEN_TEXT.format(f"DB {db_name} owner changed to {user}."))
-
-    def print_modules(modules):
-        module_names = [m['name'] for m in modules]
-        columns = 3
-        indexed_names = [f"{i + 1}) {name}" for i, name in enumerate(module_names)]
-        max_cell_length = max((len(s) for s in indexed_names), default=20) + 2
-        for i in range(0, len(indexed_names), columns):
-            row = indexed_names[i:i + columns]
-            print("".join(cell.ljust(max_cell_length) for cell in row))
-
-    modules_updated_env = None
-
-    def select_module(env, state, selection_text):
-        nonlocal modules_updated_env
-        if modules_updated_env is not env:
+    def select_modules(env, states, selection_text):
+        nonlocal modules_updated_for
+        if modules_updated_for != env.cr.dbname:
             # Rescans the addons path on disk, which is expensive: only do it
             # once per environment (i.e. once per "Get Environment"/DB), not
             # every time this submenu is opened.
             print(YELLOW_TEXT.format('Updating modules list...'))
             try:
-                env['base.module.update'].create({}).update_module()
+                core.update_module_list(env)
             except Exception:
                 pass
-            modules_updated_env = env
+            modules_updated_for = env.cr.dbname
         print("******************************")
-        modules = env['ir.module.module'].search_read([('state', 'in', state)], ['name'])
-        print_modules(modules)
-        set_completer(make_modules_completer([m['name'] for m in modules]))
+        names = core.module_names(env, states)
+        print_modules(names)
+        set_completer(make_modules_completer(names))
         user_input = input(selection_text)
         if user_input == 'c':
             return None
-
-        modules_list = user_input.split()
-        module_ids = env['ir.module.module'].search(
-            [('name', 'in', modules_list), ('state', 'in', state)]
-        )
-        if not module_ids:
-            print("Module not found.")
-            return None
-
-        return module_ids
-
-    def select_db():
         try:
-            dbs = odoo.service.db.list_dbs(force=True)
-        except TypeError:
-            dbs = odoo.service.db.list_dbs()
-        dbs.append('Cancel')
-        option = ui.select(dbs)
-        clear()
-        if option == 'Cancel':
+            return core.get_modules(env, user_input.split(), states).mapped('name')
+        except ValueError as e:
+            print(e)
             return None
-        return option
 
-    set_completer(path_completer)
     env = None
+    env_ctx = None
+
+    def close_env():
+        nonlocal env, env_ctx
+        if env_ctx:
+            env_ctx.__exit__(None, None, None)
+            print("Cursor closed.")
+        env = env_ctx = None
 
     try:
         while True:
@@ -583,142 +195,137 @@ def main():
             clear()
 
             if option == 'Restore DB':
-                set_completer(path_completer)
                 dump_path = input('Specify the file path: ')
-                if not dump_path.endswith('.zip'):
-                    print('The dump must be a .zip file')
-                    continue
                 db_name = input('Enter the name of the database (c to cancel): ')
                 if db_name == 'c':
                     continue
-                restore_db(db_name, dump_path)
+                copy = ui.confirm('Is it a copy?', 'y')
+                neutralize = ui.confirm('Neutralize DB?:', 'n')
+                attempt(core.restore_db, db_name, dump_path, copy=copy, neutralize=neutralize,
+                        done=GREEN_TEXT.format(f"Database {db_name} restored."))
 
             elif option == 'Drop DB':
                 print(RED_TEXT.format("Drop DB"))
                 db_name = select_db()
-                if not db_name:
-                    continue
-                drop_db(db_name)
+                if db_name and ui.confirm(RED_TEXT.format(f"Are you sure you want to drop database {db_name}?")):
+                    print(RED_TEXT.format("Dropping database..."))
+                    attempt(core.drop_db, db_name, done=RED_TEXT.format(f"Database {db_name} dropped."))
 
             elif option == 'Backup DB':
                 print(BLUE_TEXT.format("Backup DB"))
                 db_name = select_db()
                 if not db_name:
                     continue
-                dump_db(db_name)
+                backup_file = input(f'Specify the path to the backup (default: {db_name}.zip): ') or f"{db_name}.zip"
+                if not backup_file.endswith('.zip'):
+                    backup_file += '.zip'
+                print(BLUE_TEXT.format("Starting database dump..."))
+                if not attempt(core.dump_db, db_name, backup_file,
+                               done=f"Database {db_name} dumped to {backup_file}."):
+                    print(RED_TEXT.format(f"Database {db_name} dump failed."))
 
             elif option == 'Duplicate DB':
                 print(BLUE_TEXT.format("Duplicate DB"))
                 db_name = select_db()
                 if not db_name:
                     continue
-                duplicate_db(db_name)
+                new_db_name = input('Enter the name of the new DB: ')
+                neutralize = ui.confirm('Neutralize DB?:', 'n')
+                attempt(core.duplicate_db, db_name, new_db_name, neutralize=neutralize,
+                        done=GREEN_TEXT.format(f"Database {db_name} duplicated to {new_db_name}."))
 
             elif option == 'Send DB':
                 print(BLUE_TEXT.format("Send DB"))
                 db_name = select_db()
                 if not db_name:
                     continue
-                send_db(db_name)
+                if len(odoo_paths) < 2:
+                    print(RED_TEXT.format("No other Odoo installation found to send the DB to."))
+                    continue
+                to = ui.select(odoo_paths, prompt="Select destination Odoo path:")
+                dest_conf = os.path.join(os.path.dirname(to), 'odoo.conf')
+                if not os.path.isfile(dest_conf):
+                    dest_conf = input("Specify the path to destination Odoo conf file: ")
+                new_db_name = input('Enter the name of the new DB: ')
+                print(BLUE_TEXT.format(f"Creating database {new_db_name} from template {db_name}..."))
+                attempt(core.send_db, db_name, new_db_name, dest_conf, done=GREEN_TEXT.format("DB copied."))
 
             elif option == 'Change DB user':
                 print(BLUE_TEXT.format("Change DB user"))
                 db_name = select_db()
                 if not db_name:
                     continue
-                change_db_user(db_name)
+                user = ui.select(core.list_pg_users() + ['Cancel'], prompt="Select the new DB user:")
+                if user != 'Cancel':
+                    attempt(core.change_owner, db_name, user,
+                            done=GREEN_TEXT.format(f"DB {db_name} owner changed to {user}."))
 
             elif option == 'Migrate DB':
                 print(BLUE_TEXT.format("Migrate DB"))
                 db_name = select_db()
                 if not db_name:
                     continue
-                migrate_db(db_name)
+                upgrade_path = core.default_upgrade_path()
+                if not os.path.exists(upgrade_path):
+                    print(RED_TEXT.format(f"OpenUpgrade path not found: {upgrade_path}"))
+                    upgrade_path = input("Specify the path to OpenUpgrade scripts: ")
+                print(RED_TEXT.format("Migrating database..."))
+                attempt(core.migrate_db, db_name, upgrade_path,
+                        done=GREEN_TEXT.format(f"Database {db_name} migrated."))
 
             elif option == 'List DBs':
-                try:
-                    dbs = odoo.service.db.list_dbs(force=True)
-                except TypeError:
-                    dbs = odoo.service.db.list_dbs()
-                for i, db in enumerate(dbs, 1):
+                for i, db in enumerate(core.list_dbs(), 1):
                     print(i, db)
 
             elif option == 'Get Environment':
-                if env:
-                    env.cr.close()
+                close_env()
                 print(GREEN_TEXT.format("Get Environment"))
                 db_name = select_db()
                 if not db_name:
                     continue
-                registry = odoo.modules.registry.Registry(db_name)
-                cursor = registry.cursor()
-                # Odoo <15 requires manage() context to initialize thread-local environments storage
-                if hasattr(odoo.api.Environment, 'manage'):
-                    odoo.api.Environment.manage().__enter__()
-                env = odoo.api.Environment(cursor, SUPERUSER_ID, {'lang': 'es_ES'})
+                env_ctx = core.environment(db_name)
+                env = env_ctx.__enter__()
 
             elif option == 'Uninstall Module':
-                module_ids = select_module(
+                names = select_modules(
                     env,
                     ['installed', 'to upgrade'],
                     RED_TEXT.format('Specify the module(s) to uninstall (space-separated, c to cancel): '),
                 )
-                if module_ids is None:
-                    continue
-                if not ui.confirm(RED_TEXT.format(
-                    f'Are you sure you want to uninstall {[m.name for m in module_ids]}?: '
-                )):
-                    continue
-                clear()
-                try:
-                    for module in module_ids:
-                        print(RED_TEXT.format(f"Uninstalling module {module.name}..."))
-                        module.button_immediate_uninstall()
-                        print(RED_TEXT.format(f"Module {module.name} uninstalled."))
-                except Exception:
-                    print(traceback.format_exc())
+                if names and ui.confirm(RED_TEXT.format(f'Are you sure you want to uninstall {names}?: ')):
+                    clear()
+                    print(RED_TEXT.format(f"Uninstalling {names}..."))
+                    attempt(core.uninstall_modules, env, names, done=RED_TEXT.format(f"Uninstalled {names}."))
 
             elif option == 'Install Module':
-                module_ids = select_module(
+                names = select_modules(
                     env,
                     ['uninstalled'],
                     GREEN_TEXT.format('Specify the module(s) to install (space-separated, c to cancel): '),
                 )
-                if module_ids is None:
-                    continue
-                clear()
-                for module in module_ids:
-                    try:
-                        print(GREEN_TEXT.format(f"Installing module {module.name}..."))
-                        module.button_immediate_install()
-                        print(f"Module {module.name} installed.")
-                    except Exception:
-                        print(traceback.format_exc())
+                if names:
+                    clear()
+                    print(GREEN_TEXT.format(f"Installing {names}..."))
+                    attempt(core.install_modules, env, names, done=f"Installed {names}.")
 
             elif option == 'Update Module':
-                module_ids = select_module(
+                names = select_modules(
                     env,
                     ['installed'],
                     BLUE_TEXT.format('Specify the module(s) to update (space-separated, c to cancel): '),
                 )
-                if module_ids is None:
-                    continue
-                clear()
-                for module in module_ids:
-                    try:
-                        print(BLUE_TEXT.format(f"Updating module {module.name}..."))
-                        module.button_immediate_upgrade()
-                        print(BLUE_TEXT.format(f"Module {module.name} updated."))
-                    except Exception:
-                        print(traceback.format_exc())
+                if names:
+                    clear()
+                    print(BLUE_TEXT.format(f"Updating {names}..."))
+                    attempt(core.upgrade_modules, env, names, done=BLUE_TEXT.format(f"Updated {names}."))
 
             elif option == 'Export translation':
-                module_ids = select_module(
+                names = select_modules(
                     env,
                     ['installed'],
                     BLUE_TEXT.format('Specify the module to export translation (c to cancel): '),
                 )
-                if module_ids is None:
+                if not names:
                     continue
                 clear()
                 lang = input('Indicate the language (default: es_ES): ') or 'es_ES'
@@ -728,19 +335,9 @@ def main():
                     continue
                 if not export_path.endswith('.po'):
                     export_path += '.po'
-
-                try:
-                    print(BLUE_TEXT.format(f"Exporting translation for {[m.name for m in module_ids]}..."))
-                    export = env["base.language.export"].create(
-                        {"lang": lang, "format": "po", "modules": [(6, 0, module_ids.ids)]}
-                    )
-                    export.act_getfile()
-                    data = base64.b64decode(export.data)
-                    with open(export_path, 'wb') as f:
-                        f.write(data)
-                    print(f"Translation exported to {export_path}.")
-                except Exception:
-                    print(traceback.format_exc())
+                print(BLUE_TEXT.format(f"Exporting translation for {names}..."))
+                attempt(core.export_translation, env, names, lang, export_path,
+                        done=f"Translation exported to {export_path}.")
 
             elif option == 'Exit':
                 break
@@ -749,13 +346,11 @@ def main():
         print(traceback.format_exc())
 
     finally:
-        if env:
-            try:
-                env.cr.close()
-                print("Cursor closed.")
-            except Exception:
-                print(traceback.format_exc())
+        try:
+            close_env()
+        except Exception:
+            print(traceback.format_exc())
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())

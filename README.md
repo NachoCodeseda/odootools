@@ -17,15 +17,36 @@ otools
 
 Select `Get Environment` to manage module installations and export translations
 
-### Pathfinder (no UI)
+![alt text](images/image-1.png)
 
-Find the shortest relational paths between two models:
+### Command line (no UI)
+
+Every menu action can also run non-interactively. Only the result is printed
+(Odoo logs are hidden unless `-v`); errors go to stderr with exit code 1.
 
 ```sh
-otools --pathfinder my_database account.move.line stock.warehouse
+otools -l                                        # list databases
+otools -b my_db -o /backups/my_db.zip            # backup (dump + filestore)
+otools -r /backups/my_db.zip my_db_copy          # restore as a copy (new UUID)
+otools -r my_db.zip my_db --no-copy              # restore keeping the UUID
+otools -r my_db.zip my_db_test --neutralize      # restore neutralized (Odoo 16+)
+otools --duplicate my_db my_db_test [--neutralize]
+otools --drop my_db_test -y
+otools --send my_db my_db_19 --dest-conf /opt/odoo19/odoo.conf
+otools --owner my_db odoo18                      # change PostgreSQL owner
+otools --pg-users                                # PostgreSQL login roles
+otools --migrate my_db [--upgrade-path DIR]      # OpenUpgrade
+otools -m my_db installed                        # list modules by state
+otools -i my_db sale stock                       # install
+otools -u my_db my_module                        # update
+otools --uninstall my_db my_module -y
+otools -t my_db my_module --lang es_ES -o es.po  # export translations
+otools -p my_db account.move.line stock.warehouse  # pathfinder
 ```
 
-![alt text](images/image-1.png)
+With several Odoo installations, choose one with `--odoo-path` / `-c`
+(or `ODOO_PATH` / `ODOO_CONF`); otherwise the first one found is used.
+See `otools -h` for all options.
 
 ---
 
