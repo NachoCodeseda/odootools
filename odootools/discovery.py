@@ -1,4 +1,5 @@
 import os
+import sys
 import glob
 import shutil
 import importlib.util
@@ -59,12 +60,15 @@ def discover_all_installations() -> List[str]:
     except (ValueError, ModuleNotFoundError):
         pass
 
-    # 3. Walk up from this file's location (e.g. installed inside /opt/odoo18/custom_addons/…)
-    for parent in list(Path(__file__).resolve().parents)[:6]:
-        register(str(parent))
-        nested = parent / 'odoo'
-        if nested.is_dir():
-            register(str(nested))
+    # 3. Walk up from the running script, the cwd and this file's location
+    anchors = [Path(sys.argv[0]).resolve().parent] if sys.argv and sys.argv[0] else []
+    anchors += [Path.cwd(), Path(__file__).resolve().parent]
+    for anchor in anchors:
+        for parent in [anchor, *anchor.parents][:6]:
+            register(str(parent))
+            nested = parent / 'odoo'
+            if nested.is_dir():
+                register(str(nested))
 
     # 4. odoo-bin in system PATH
     bin_path = shutil.which('odoo-bin') or shutil.which('odoo')

@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="odootools",
-    version="1.1.9",
+    version="1.2.0",
     packages=find_packages(),
     install_requires=["packaging", "bullet", "tqdm"],
     entry_points={
