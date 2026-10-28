@@ -317,10 +317,12 @@ def change_owner(db_name, user):
 
 
 def default_upgrade_path():
-    return os.path.join(
-        os.path.dirname(ODOO_PATH or ''), 'custom_addons', 'oca', 'OpenUpgrade',
-        'openupgrade_scripts', 'scripts'
-    )
+    paths = [
+        os.path.join(os.path.dirname(ODOO_PATH or ''), 'custom_addons', oca, 'OpenUpgrade',
+                     'openupgrade_scripts', 'scripts')
+        for oca in ('OCA', 'oca')
+    ]
+    return next((p for p in paths if os.path.exists(p)), paths[0])
 
 
 def _colorize(line):
@@ -342,7 +344,7 @@ def migrate_db(db_name, upgrade_path=None):
             raise FileNotFoundError(f"Not found: {path}")
 
     cmd = [
-        odoobin_path,
+        sys.executable, odoobin_path,
         "-c", ODOO_CONF,
         "-d", db_name,
         f"--upgrade-path={upgrade_path}",
