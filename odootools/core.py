@@ -20,7 +20,6 @@ from datetime import datetime
 
 import psycopg2
 from psycopg2 import sql as psql_sql
-from tqdm import tqdm
 
 _logger = logging.getLogger(__name__)
 
@@ -286,23 +285,14 @@ def send_db(db_name, new_db_name, dest_conf):
     if not os.path.isdir(src_filestore):
         return
 
-    file_sizes = {}
-    for root, _, files in os.walk(src_filestore):
-        for f in files:
-            path = os.path.join(root, f)
-            file_sizes[path] = os.path.getsize(path)
+    def link_or_copy(src, dst):
+        try:
+            os.link(src, dst)
+        except OSError:
+            shutil.copy2(src, dst)
 
-    with tqdm(total=sum(file_sizes.values()), unit='B', unit_scale=True,
-              unit_divisor=1024, desc='Copying filestore') as pbar:
-        def copy_with_progress(src, dst):
-            try:
-                os.link(src, dst)
-            except OSError:
-                shutil.copy2(src, dst)
-            pbar.update(file_sizes.get(src, 0) or os.path.getsize(src))
-
-        shutil.copytree(src_filestore, dst_filestore,
-                        copy_function=copy_with_progress, dirs_exist_ok=True)
+    shutil.copytree(src_filestore, dst_filestore,
+                    copy_function=link_or_copy, dirs_exist_ok=True)
 
 
 def change_owner(db_name, user):

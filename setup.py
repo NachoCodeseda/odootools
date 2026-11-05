@@ -2,9 +2,9 @@ from setuptools import setup, find_packages
 
 setup(
     name="odootools",
-    version="1.2.0",
+    version="1.2.1",
     packages=find_packages(),
-    install_requires=["packaging", "bullet", "tqdm"],
+    install_requires=["packaging", "bullet"],
     entry_points={
         "console_scripts": [
             "otools = odootools.main:main"
