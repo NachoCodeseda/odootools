@@ -42,6 +42,7 @@ otools -u my_db my_module                        # update
 otools --uninstall my_db my_module -y
 otools -t my_db my_module --lang es_ES -o es.po  # export translations
 otools -p my_db account.move.line stock.warehouse  # pathfinder
+otools --unlink my_db my_module.my_record -y     # delete records by xml_id (ORM)
 ```
 
 With several Odoo installations, choose one with `--odoo-path` / `-c`

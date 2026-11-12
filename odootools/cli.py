@@ -19,6 +19,7 @@ examples:
   otools -i my_db sale stock
   otools -t my_db my_module --lang es_ES -o es.po
   otools -p my_db account.move.line stock.warehouse
+  otools --unlink my_db my_module.my_record -y
   otools --odoo-path /opt/odoo18 -l      # pick the installation when there are several
 """
 
@@ -60,6 +61,8 @@ def build_parser():
                          help='uninstall modules (asks unless -y): DB MODULE [MODULE ...]')
     actions.add_argument('-t', '--export-po', nargs='+', metavar=('DB', 'MODULE'),
                          help='export translations to a .po file (see --lang, -o)')
+    actions.add_argument('--unlink', nargs='+', metavar=('DB', 'XMLID'),
+                         help='delete records by xml_id via the ORM (asks unless -y): DB XMLID [XMLID ...]')
     actions.add_argument('-p', '--pathfinder', nargs=3, metavar=('DB', 'ORIGIN', 'DESTINATION'),
                          help='shortest relational paths between two models')
 
@@ -105,7 +108,7 @@ def _confirm(question, args):
 
 def _db_and_modules(values, flag, parser):
     if len(values) < 2:
-        parser.error(f'{flag} needs DB and at least one MODULE')
+        parser.error(f'{flag} needs DB and at least one argument')
     return values[0], values[1:]
 
 
@@ -180,6 +183,14 @@ def _dispatch(args, parser):
         with core.environment(db) as env:
             core.uninstall_modules(env, names)
         print(f"Uninstalled: {' '.join(names)}")
+
+    elif args.unlink:
+        db, xmlids = _db_and_modules(args.unlink, '--unlink', parser)
+        if not _confirm(f"Delete {' '.join(xmlids)} from {db}?", args):
+            return 1
+        with core.environment(db) as env:
+            core.unlink_xmlids(env, xmlids)
+        print(f"Deleted: {' '.join(xmlids)}")
 
     elif args.export_po:
         db, names = _db_and_modules(args.export_po, '--export-po', parser)

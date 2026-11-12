@@ -440,6 +440,13 @@ def uninstall_modules(env, names):
     get_modules(env, names, ['installed', 'to upgrade']).button_immediate_uninstall()
 
 
+def unlink_xmlids(env, xmlids):
+    """Delete the records behind xmlids through the ORM (unlink overrides, cascades, ir.model.data)."""
+    for xmlid in xmlids:
+        env.ref(xmlid).unlink()  # raises ValueError if the xmlid does not exist
+    env.cr.commit()
+
+
 def export_translation(env, names, lang, po_file):
     modules = get_modules(env, names, ['installed'])
     export = env["base.language.export"].create(
