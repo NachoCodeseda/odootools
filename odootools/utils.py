@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import List, Union
 from packaging import version as pkg_version
 from .discovery import discover_odoo, find_conf_file
+from .core import SUPERUSER_ID, parse_config  # odoo.SUPERUSER_ID is gone in Odoo 19+
 
 
 _logger = logging.getLogger(__name__)
@@ -19,7 +20,8 @@ if _odoo_path:
 
 try:
     import odoo
-    from odoo import api, SUPERUSER_ID
+    import odoo.tools
+    from odoo import api
 except ImportError as e:
     raise ImportError(
         "Could not import Odoo: no installation was auto-discovered and Odoo "
@@ -63,9 +65,10 @@ class Tools:
         if odoo_conf is None:
             odoo_conf = _resolve_default_conf()
         if odoo_conf not in _parsed_confs:
-            odoo.tools.config.parse_config(['-c', odoo_conf])
+            parse_config(odoo.tools.config, ['-c', odoo_conf])
             _parsed_confs.add(odoo_conf)
         self._odoo_version = pkg_version.parse(odoo.release.version)
+        import odoo.modules.registry
         registry = odoo.modules.registry.Registry(db_name)
         cursor = registry.cursor()
 
@@ -106,7 +109,13 @@ class Tools:
         path.mkdir(parents=True, exist_ok=True)
         backup_file = path / f"{self.env.cr.dbname}.zip"
         with open(backup_file, "wb") as destiny:
-            odoo.service.db.dump_db(self.env.cr.dbname, destiny, "zip")
+            try:
+                from odoo.modules.db import dump  # Odoo 20+
+            except ImportError:
+                import odoo.service.db
+                odoo.service.db.dump_db(self.env.cr.dbname, destiny, "zip")
+            else:
+                dump(self.env.cr.dbname, destiny, backup_format="zip")
 
     def print_report(self, report_xml_id: str, res_id: int, report_file: str = "report.pdf"):
         """

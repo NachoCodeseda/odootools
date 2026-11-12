@@ -24,7 +24,7 @@ from psycopg2 import sql as psql_sql
 _logger = logging.getLogger(__name__)
 
 # /tmp may be tmpfs (RAM-backed) and too small for large dumps/filestores.
-# Also applies to the TemporaryDirectory used inside odoo.service.db.dump_db.
+# Also applies to the TemporaryDirectory used inside Odoo's db dump.
 tempfile.tempdir = '/var/tmp'
 
 SUPERUSER_ID = 1  # same in every version; odoo.SUPERUSER_ID is gone in Odoo 19
@@ -33,6 +33,7 @@ odoo = None
 ODOO_PATH = None
 ODOO_CONF = None
 SUBPROCESS_ENV = {**os.environ}
+DB20 = False  # Odoo 20 moved odoo.service.db (exp_* functions) to odoo.modules.db
 
 
 def find_pg_tool(tool):
@@ -41,7 +42,7 @@ def find_pg_tool(tool):
 
 def init(odoo_path, odoo_conf):
     """Import the Odoo found at odoo_path and load odoo_conf."""
-    global odoo, ODOO_PATH, ODOO_CONF, SUBPROCESS_ENV, find_pg_tool
+    global odoo, ODOO_PATH, ODOO_CONF, SUBPROCESS_ENV, find_pg_tool, DB20
     ODOO_PATH, ODOO_CONF = odoo_path, odoo_conf
     if odoo_path:
         sys.path.append(odoo_path)
@@ -49,11 +50,14 @@ def init(odoo_path, odoo_conf):
     # Odoo 19 is a namespace package (no __init__.py), so submodules are
     # not auto-imported — we must import them explicitly.
     import odoo.tools
-    odoo.tools.config.parse_config(['-c', odoo_conf, '--logfile='])
+    parse_config(odoo.tools.config, ['-c', odoo_conf, '--logfile='])
     import odoo.api
     import odoo.modules.registry
-    import odoo.service.db
+    import odoo.modules.db
     import odoo.sql_db
+    DB20 = hasattr(odoo.modules.db, 'drop')
+    if not DB20:
+        import odoo.service.db
 
     try:
         from odoo.tools.misc import exec_pg_environ, find_pg_tool
@@ -64,6 +68,14 @@ def init(odoo_path, odoo_conf):
                          ('db_port', 'PGPORT'), ('db_user', 'PGUSER')):
             if odoo.tools.config.get(key):
                 SUBPROCESS_ENV[var] = str(odoo.tools.config[key])
+
+
+def parse_config(config, args):
+    """Odoo 20 warns unless told whether to set up its logging; older versions lack the flag."""
+    if 'setup_logging' in inspect.signature(config.parse_config).parameters:
+        config.parse_config(args, setup_logging=True)
+    else:
+        config.parse_config(args)
 
 
 def validate_db_name(name):
@@ -85,6 +97,8 @@ def _supports_neutralize(func, min_params):
 # ---------------------------------------------------------------------------
 
 def list_dbs():
+    if DB20:
+        return odoo.modules.db.list_dbs(force=True)
     try:
         return odoo.service.db.list_dbs(force=True)
     except TypeError:
@@ -96,6 +110,20 @@ def list_pg_users():
     with closing(db.cursor()) as cr:
         cr.execute("SELECT rolname FROM pg_roles WHERE rolcanlogin = true ORDER BY rolname")
         return [row[0] for row in cr.fetchall()]
+
+
+def db_exists(db_name):
+    return odoo.modules.db.exist(db_name) if DB20 else odoo.service.db.exp_db_exist(db_name)
+
+
+def _drop(db_name):
+    """Like the old exp_drop: False if db_name isn't one of this Odoo's databases."""
+    if not DB20:
+        return odoo.service.db.exp_drop(db_name)
+    if db_name not in list_dbs():
+        return False
+    odoo.modules.db.drop(db_name)
+    return True
 
 
 def pg_terminate_backend(db_name):
@@ -177,9 +205,9 @@ def restore_db(db, dump_file, copy=True, neutralize=False):
     validate_db_name(db)
     if not os.path.isfile(dump_file):
         raise FileNotFoundError(f"Dump file not found: {dump_file}")
-    if odoo.service.db.exp_db_exist(db):
+    if db_exists(db):
         raise ValueError(f"Database {db!r} already exists")
-    if neutralize and not _supports_neutralize(odoo.service.db.restore_db, 4):
+    if neutralize and not DB20 and not _supports_neutralize(odoo.service.db.restore_db, 4):
         raise ValueError("Database neutralization is not available in this Odoo version")
 
     _logger.info('RESTORING DB: %s', db)
@@ -206,7 +234,7 @@ def restore_db(db, dump_file, copy=True, neutralize=False):
             stderr=subprocess.STDOUT,
         )
         if r.returncode != 0:
-            odoo.service.db.exp_drop(db)  # we just created it empty, don't leave it behind
+            _drop(db)  # we just created it empty, don't leave it behind
             raise RuntimeError(f"Couldn't restore database {db!r} ({pg_cmd} exit code {r.returncode})")
 
         if filestore_path:
@@ -226,7 +254,7 @@ def restore_db(db, dump_file, copy=True, neutralize=False):
 
 
 def drop_db(db_name):
-    if not odoo.service.db.exp_drop(db_name):
+    if not _drop(db_name):
         raise ValueError(f"Database {db_name!r} does not exist or is not owned by this Odoo's db_user")
 
 
@@ -236,7 +264,10 @@ def dump_db(db_name, backup_file):
     try:
         with open(backup_file, "wb") as destiny:
             opened = True
-            odoo.service.db.dump_db(db_name, destiny, "zip")
+            if DB20:
+                odoo.modules.db.dump(db_name, destiny, backup_format="zip")
+            else:
+                odoo.service.db.dump_db(db_name, destiny, "zip")
     except BaseException:
         if opened:
             os.remove(backup_file)  # don't leave a truncated zip behind
@@ -245,6 +276,9 @@ def dump_db(db_name, backup_file):
 
 def duplicate_db(db_name, new_db_name, neutralize=False):
     validate_db_name(new_db_name)
+    if DB20:
+        odoo.modules.db.duplicate(db_name, new_db_name, neutralize_database=neutralize)
+        return
     func = odoo.service.db.exp_duplicate_database
     if _supports_neutralize(func, 3):
         func(db_name, new_db_name, neutralize)
@@ -260,7 +294,7 @@ def send_db(db_name, new_db_name, dest_conf):
     validate_db_name(new_db_name)
     if not os.path.isfile(dest_conf):
         raise FileNotFoundError(f"Destination conf not found: {dest_conf}")
-    if odoo.service.db.exp_db_exist(new_db_name):
+    if db_exists(new_db_name):
         raise ValueError(f"Database {new_db_name!r} already exists")
 
     config = configparser.ConfigParser()
