@@ -288,6 +288,24 @@ def duplicate_db(db_name, new_db_name, neutralize=False):
         func(db_name, new_db_name)
 
 
+def rename_db(db_name, new_db_name):
+    """Rename a database and move its filestore (Odoo's own rename does both)."""
+    validate_db_name(new_db_name)
+    if not db_exists(db_name):
+        raise ValueError(f"Database {db_name!r} does not exist")
+    if db_exists(new_db_name):
+        raise ValueError(f"Database {new_db_name!r} already exists")
+    # Odoo silently skips the filestore move if the target exists, leaving the
+    # renamed database without its attachments.
+    new_fs = odoo.tools.config.filestore(new_db_name)
+    if os.path.exists(new_fs):
+        raise ValueError(f"Filestore {new_fs} already exists")
+    if DB20:
+        odoo.modules.db.rename(db_name, new_db_name)
+    else:
+        odoo.service.db.exp_rename(db_name, new_db_name)
+
+
 def send_db(db_name, new_db_name, dest_conf):
     """Copy a database (template copy + hardlinked filestore) owned by dest_conf's db_user."""
     validate_db_name(db_name)

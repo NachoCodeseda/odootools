@@ -15,6 +15,7 @@ examples:
   otools -b my_db -o /backups/my_db.zip
   otools -r /backups/my_db.zip my_db_test --neutralize
   otools --duplicate my_db my_db_test
+  otools --rename my_db_test my_db_old -y
   otools --drop my_db_test -y
   otools -i my_db sale stock
   otools -t my_db my_module --lang es_ES -o es.po
@@ -43,6 +44,8 @@ def build_parser():
     actions.add_argument('--drop', metavar='DB', help='drop a database (asks unless -y)')
     actions.add_argument('--duplicate', nargs=2, metavar=('DB', 'NEW_DB'),
                          help='duplicate a database with its filestore')
+    actions.add_argument('--rename', nargs=2, metavar=('DB', 'NEW_DB'),
+                         help='rename a database and its filestore (asks unless -y)')
     actions.add_argument('--send', nargs=2, metavar=('DB', 'NEW_DB'),
                          help='copy DB as NEW_DB owned by the db_user of --dest-conf')
     actions.add_argument('--owner', nargs=2, metavar=('DB', 'USER'),
@@ -141,6 +144,13 @@ def _dispatch(args, parser):
         db, new_db = args.duplicate
         core.duplicate_db(db, new_db, neutralize=args.neutralize)
         print(f"Database {db} duplicated to {new_db}")
+
+    elif args.rename:
+        db, new_db = args.rename
+        if not _confirm(f"Rename database {db} to {new_db}? Its connections will be closed.", args):
+            return 1
+        core.rename_db(db, new_db)
+        print(f"Database {db} renamed to {new_db}")
 
     elif args.send:
         if not args.dest_conf:
