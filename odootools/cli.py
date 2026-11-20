@@ -1,4 +1,4 @@
-"""Non-interactive entry point: `otools <action> ...`. Without arguments otools opens the menu."""
+"""Command line entry point: `otools <action> ...`."""
 import argparse
 import logging
 import os
@@ -21,6 +21,8 @@ examples:
   otools -t my_db my_module --lang es_ES -o es.po
   otools -p my_db account.move.line stock.warehouse
   otools --unlink my_db my_module.my_record -y
+  otools -d my_db -c "print(env['res.partner'].browse(32).name)"
+  otools -d my_db -c "env['res.partner'].browse(32).name = 'X'; env.cr.commit()"
   otools --odoo-path /opt/odoo18 -l      # pick the installation when there are several
 """
 
@@ -28,8 +30,7 @@ examples:
 def build_parser():
     parser = argparse.ArgumentParser(
         prog='otools',
-        usage='otools                   interactive menu\n'
-              '       otools ACTION [SETTINGS]  run one action and exit',
+        usage='otools ACTION [SETTINGS]',
         description='Odoo database and module tools. Only the result is printed; '
                     'Odoo logs are hidden unless -v is given.',
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -68,11 +69,14 @@ def build_parser():
                          help='delete records by xml_id via the ORM (asks unless -y): DB XMLID [XMLID ...]')
     actions.add_argument('-p', '--pathfinder', nargs=3, metavar=('DB', 'ORIGIN', 'DESTINATION'),
                          help='shortest relational paths between two models')
+    actions.add_argument('-c', '--code', help='run Python code in an Odoo shell on -d DB '
+                         '(env, odoo and self=env.user are available; commit with env.cr.commit())')
 
     opts = parser.add_argument_group('settings')
     opts.add_argument('--odoo-path', help='directory containing odoo-bin '
                       '(default: $ODOO_PATH or the first installation found)')
-    opts.add_argument('-c', '--conf', help='odoo.conf (default: $ODOO_CONF or next to odoo-bin)')
+    opts.add_argument('-d', '--database', help='database for --code')
+    opts.add_argument('--conf', help='odoo.conf (default: $ODOO_CONF or next to odoo-bin)')
     opts.add_argument('-o', '--output', help='output file for --backup (DB.zip) and --export-po (LANG.po)')
     opts.add_argument('--no-copy', dest='copy', action='store_false',
                       help="--restore: keep the database UUID (it was moved, not copied)")
@@ -96,7 +100,7 @@ def _resolve_installation(args, parser):
         path, conf = discover_odoo()
         conf = args.conf or conf
     if not conf:
-        parser.error('no odoo.conf found, use -c/--conf')
+        parser.error('no odoo.conf found, use --conf')
     return path, conf
 
 
@@ -117,7 +121,11 @@ def _db_and_modules(values, flag, parser):
 
 def _dispatch(args, parser):
     if args.list:
-        print('\n'.join(core.list_dbs()))
+        dbs = core.list_dbs()
+        owners = core.db_owners(dbs)
+        width = max(map(len, dbs), default=0)
+        for db in dbs:
+            print(f"{db:<{width}}  {owners.get(db, '')}")
 
     elif args.pg_users:
         print('\n'.join(core.list_pg_users()))
@@ -221,6 +229,12 @@ def _dispatch(args, parser):
             return 1
         print('\n\n'.join(format_path(p) for p in paths))
 
+    elif args.code is not None:
+        if not args.database:
+            parser.error('--code requires -d/--database')
+        with core.environment(args.database) as env:
+            exec(args.code, {'env': env, 'odoo': core.odoo, 'self': env.user})
+
     else:
         parser.error('choose an action')
     return 0
@@ -228,6 +242,9 @@ def _dispatch(args, parser):
 
 def run(argv):
     parser = build_parser()
+    if not argv:
+        parser.print_help()
+        return 1
     args = parser.parse_args(argv)
     if not args.verbose:
         # Odoo configures levels/handlers but never re-enables this.

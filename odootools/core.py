@@ -105,6 +105,17 @@ def list_dbs():
         return odoo.service.db.list_dbs()
 
 
+def db_owners(db_names):
+    """Return {db_name: PostgreSQL owner} for db_names."""
+    db = odoo.sql_db.db_connect('postgres')
+    with closing(db.cursor()) as cr:
+        cr.execute(
+            "SELECT datname, pg_get_userbyid(datdba) FROM pg_database WHERE datname IN %s",
+            (tuple(db_names) or ('',),),
+        )
+        return dict(cr.fetchall())
+
+
 def list_pg_users():
     db = odoo.sql_db.db_connect('postgres')
     with closing(db.cursor()) as cr:
@@ -367,18 +378,8 @@ def default_upgrade_path():
     return next((p for p in paths if os.path.exists(p)), paths[0])
 
 
-def _colorize(line):
-    if "ERROR" in line or "CRITICAL" in line:
-        return f"\033[91m{line}\033[0m"
-    elif "WARNING" in line:
-        return f"\033[93m{line}\033[0m"
-    elif "DEBUG" in line:
-        return f"\033[94m{line}\033[0m"
-    return line
-
-
 def migrate_db(db_name, upgrade_path=None):
-    """Run OpenUpgrade on db_name with odoo-bin, streaming its output."""
+    """Run OpenUpgrade on db_name with odoo-bin. Its Odoo log always goes to the terminal."""
     upgrade_path = upgrade_path or default_upgrade_path()
     odoobin_path = os.path.join(ODOO_PATH or '', 'odoo-bin')
     for path in (upgrade_path, odoobin_path):
@@ -393,14 +394,11 @@ def migrate_db(db_name, upgrade_path=None):
         "--update", "all",
         "--stop-after-init",
         "--load=base,web,openupgrade_framework",
+        "--logfile=",  # log to the terminal even if the conf sets a logfile
     ]
-    print(' '.join(cmd))
-    with subprocess.Popen(
-        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
-    ) as p:
-        for line in p.stdout:
-            print(_colorize(line), end="")
-    if p.returncode != 0:
+    _logger.info(' '.join(cmd))
+    r = subprocess.run(cmd)
+    if r.returncode != 0:
         raise RuntimeError("Migration ended with errors")
 
 

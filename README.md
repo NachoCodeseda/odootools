@@ -9,19 +9,8 @@ pip install git+https://github.com/NachoCodeseda/odootools
 ```
 
 ## Usage
-Use the `otools` command in terminal
-```sh
-otools
-```
-![alt text](images/image-2.png)
 
-Select `Get Environment` to manage module installations and export translations
-
-![alt text](images/image-1.png)
-
-### Command line (no UI)
-
-Every menu action can also run non-interactively. Only the result is printed
+Use the `otools` (or `odootools`) command. Only the result is printed
 (Odoo logs are hidden unless `-v`); errors go to stderr with exit code 1.
 
 ```sh
@@ -43,9 +32,10 @@ otools --uninstall my_db my_module -y
 otools -t my_db my_module --lang es_ES -o es.po  # export translations
 otools -p my_db account.move.line stock.warehouse  # pathfinder
 otools --unlink my_db my_module.my_record -y     # delete records by xml_id (ORM)
+otools -d my_db -c "print(env['res.partner'].browse(32).name)"  # run Python in an Odoo shell
 ```
 
-With several Odoo installations, choose one with `--odoo-path` / `-c`
+With several Odoo installations, choose one with `--odoo-path` / `--conf`
 (or `ODOO_PATH` / `ODOO_CONF`); otherwise the first one found is used.
 See `otools -h` for all options.
 
