@@ -68,8 +68,9 @@ class Tools:
             parse_config(odoo.tools.config, ['-c', odoo_conf])
             _parsed_confs.add(odoo_conf)
         self._odoo_version = pkg_version.parse(odoo.release.version)
-        import odoo.modules.registry
-        registry = odoo.modules.registry.Registry(db_name)
+        # `from` import: a plain `import odoo...` here would make `odoo` local to the whole method
+        from odoo.modules.registry import Registry
+        registry = Registry(db_name)
         cursor = registry.cursor()
 
         # Odoo 12-14 stores active environments in a werkzeug LocalStack.
