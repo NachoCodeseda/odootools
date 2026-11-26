@@ -18,6 +18,7 @@ examples:
   otools --rename my_db_test my_db_old -y
   otools --drop my_db_test -y
   otools -i my_db sale stock
+  otools --update-all my_db
   otools -t my_db my_module --lang es_ES -o es.po
   otools -p my_db account.move.line stock.warehouse
   otools --unlink my_db my_module.my_record -y
@@ -55,6 +56,8 @@ def build_parser():
                          help='list PostgreSQL roles that can log in')
     actions.add_argument('--migrate', metavar='DB',
                          help='migrate DB with OpenUpgrade (see --upgrade-path)')
+    actions.add_argument('--update-all', metavar='DB',
+                         help='update all modules of DB (odoo-bin -u all --stop-after-init)')
     actions.add_argument('-m', '--modules', nargs=2, metavar=('DB', 'STATE'),
                          help='list modules in STATE (installed, uninstalled, ...)')
     actions.add_argument('-i', '--install', nargs='+', metavar=('DB', 'MODULE'),
@@ -175,6 +178,10 @@ def _dispatch(args, parser):
     elif args.migrate:
         core.migrate_db(args.migrate, args.upgrade_path)
         print(f"Database {args.migrate} migrated")
+
+    elif args.update_all:
+        core.update_all_db(args.update_all)
+        print(f"Database {args.update_all} updated")
 
     elif args.modules:
         db, state = args.modules

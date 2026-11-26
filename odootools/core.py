@@ -381,25 +381,34 @@ def default_upgrade_path():
 def migrate_db(db_name, upgrade_path=None):
     """Run OpenUpgrade on db_name with odoo-bin. Its Odoo log always goes to the terminal."""
     upgrade_path = upgrade_path or default_upgrade_path()
-    odoobin_path = os.path.join(ODOO_PATH or '', 'odoo-bin')
-    for path in (upgrade_path, odoobin_path):
-        if not os.path.exists(path):
-            raise FileNotFoundError(f"Not found: {path}")
+    if not os.path.exists(upgrade_path):
+        raise FileNotFoundError(f"Not found: {upgrade_path}")
+    _update_all(db_name, "Migration ended with errors",
+                f"--upgrade-path={upgrade_path}", "--load=base,web,openupgrade_framework")
 
+
+def update_all_db(db_name):
+    """Run odoo-bin -u all --stop-after-init on db_name. Its Odoo log always goes to the terminal."""
+    _update_all(db_name, "Update ended with errors")
+
+
+def _update_all(db_name, error, *extra_args):
+    odoobin_path = os.path.join(ODOO_PATH or '', 'odoo-bin')
+    if not os.path.exists(odoobin_path):
+        raise FileNotFoundError(f"Not found: {odoobin_path}")
     cmd = [
         sys.executable, odoobin_path,
         "-c", ODOO_CONF,
         "-d", db_name,
-        f"--upgrade-path={upgrade_path}",
+        *extra_args,
         "--update", "all",
         "--stop-after-init",
-        "--load=base,web,openupgrade_framework",
         "--logfile=",  # log to the terminal even if the conf sets a logfile
     ]
     _logger.info(' '.join(cmd))
     r = subprocess.run(cmd)
     if r.returncode != 0:
-        raise RuntimeError("Migration ended with errors")
+        raise RuntimeError(error)
 
 
 # ---------------------------------------------------------------------------
